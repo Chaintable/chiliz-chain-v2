@@ -24,10 +24,10 @@ import (
 	"math/big"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"strings"
 
 	mapset "github.com/deckarep/golang-set/v2"
 	exlru "github.com/hashicorp/golang-lru"
@@ -58,6 +58,12 @@ import (
 	"github.com/ethereum/go-ethereum/triedb/hashdb"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
 	"golang.org/x/exp/slices"
+)
+
+// Optional hooks for pipeline demo integrations. Kept behind build-tags in
+// separate files so the default build does not depend on pipeline libraries.
+var (
+	pipelineNotifyCanonicalBlock func(bc *BlockChain, block *types.Block)
 )
 
 var (
@@ -109,15 +115,16 @@ var (
 )
 
 var validatorCounters sync.Map
+
 func incValidatorBlockCount(addr common.Address) {
-    key := strings.ToLower(addr.Hex())
-    val, loaded := validatorCounters.Load(key)
-    if !loaded {
-        counter := metrics.NewRegisteredCounter(fmt.Sprintf("chain/inserts.%s", key), nil)
-        validatorCounters.Store(key, counter)
-        val = counter
-    }
-    val.(metrics.Counter).Inc(1)
+	key := strings.ToLower(addr.Hex())
+	val, loaded := validatorCounters.Load(key)
+	if !loaded {
+		counter := metrics.NewRegisteredCounter(fmt.Sprintf("chain/inserts.%s", key), nil)
+		validatorCounters.Store(key, counter)
+		val = counter
+	}
+	val.(metrics.Counter).Inc(1)
 }
 
 const (
@@ -594,6 +601,11 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, genesis *Genesis
 	// Start tx indexer if it's enabled.
 	if txLookupLimit != nil {
 		bc.txIndexer = newTxIndexer(*txLookupLimit, bc)
+	}
+
+	log.Info("Initialised blockchain", "head", bc.CurrentHeader().Number, "hash", bc.CurrentHeader().Hash())
+	if head := bc.CurrentBlock(); head != nil && head.Number.Uint64() == 0 {
+		log.Info("Genesis block is set", "hash", head.Hash())
 	}
 	return bc, nil
 }
@@ -1969,6 +1981,9 @@ func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types
 	// Set new head.
 	if status == CanonStatTy {
 		bc.writeHeadBlock(block)
+		if pipelineNotifyCanonicalBlock != nil {
+			pipelineNotifyCanonicalBlock(bc, block)
+		}
 	}
 	bc.futureBlocks.Remove(block.Hash())
 
@@ -2866,6 +2881,9 @@ func (bc *BlockChain) SetCanonical(head *types.Block) (common.Hash, error) {
 		}
 	}
 	bc.writeHeadBlock(head)
+	if pipelineNotifyCanonicalBlock != nil {
+		pipelineNotifyCanonicalBlock(bc, head)
+	}
 
 	// Emit events
 	logs := bc.collectLogs(head, false)
@@ -2886,6 +2904,10 @@ func (bc *BlockChain) SetCanonical(head *types.Block) (common.Hash, error) {
 	}
 	log.Info("Chain head was updated", context...)
 	return head.Hash(), nil
+}
+
+func (bc *BlockChain) GetSnaps() *snapshot.Tree {
+	return bc.snaps
 }
 
 func (bc *BlockChain) updateFutureBlocks() {

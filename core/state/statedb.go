@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/gopool"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state/snapshot"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -158,6 +159,67 @@ type StateDB struct {
 
 	// Testing hooks
 	onCommit func(states *triestate.Set) // Hook invoked when commit is performed
+
+	// Live tracing hooks (demo/pipeline)
+	hooks    *tracing.Hooks
+	OnCommit tracing.CommitHook
+}
+
+// SetHooks sets the live tracing hooks for this state instance.
+//
+// Note: If hooks contain an OnCommit handler, it will be wired into the existing
+// commit callback path.
+func (s *StateDB) SetHooks(hooks *tracing.Hooks) {
+	s.hooks = hooks
+	if hooks != nil && hooks.OnCommit != nil {
+		s.OnCommit = hooks.OnCommit
+	}
+}
+
+// Hooks returns the currently configured live tracing hooks.
+func (s *StateDB) Hooks() *tracing.Hooks {
+	return s.hooks
+}
+
+// SetOnCommitLogger sets a callback invoked when a state commit succeeds.
+func (s *StateDB) SetOnCommitLogger(logger tracing.CommitHook) {
+	s.OnCommit = logger
+}
+
+// StateDiff returns the current state root plus the tracked diffs since last commit.
+//
+// Note: This is a best-effort compatibility helper for the pipeline demo.
+func (s *StateDB) StateDiff(deleteEmptyObjects bool) (root common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storages map[common.Hash]map[common.Hash][]byte, codes map[common.Hash][]byte, err error) {
+	root = s.IntermediateRoot(deleteEmptyObjects)
+	destructs = make(map[common.Hash]struct{})
+	accounts = make(map[common.Hash][]byte, len(s.accounts))
+	storages = make(map[common.Hash]map[common.Hash][]byte, len(s.storages))
+	codes = make(map[common.Hash][]byte)
+
+	for addr, prev := range s.stateObjectsDestruct {
+		// Only report real deletions of previously existing accounts.
+		if prev == nil {
+			continue
+		}
+		addrHash := crypto.Keccak256Hash(addr[:])
+		destructs[addrHash] = struct{}{}
+	}
+	for k, v := range s.accounts {
+		accounts[k] = v
+	}
+	for k, v := range s.storages {
+		storages[k] = v
+	}
+	for addr := range s.stateObjectsDirty {
+		obj := s.stateObjects[addr]
+		if obj == nil || obj.deleted {
+			continue
+		}
+		if obj.code != nil && obj.dirtyCode {
+			codes[common.BytesToHash(obj.CodeHash())] = obj.code
+		}
+	}
+	return
 }
 
 // NewWithSharedPool creates a new state with sharedStorge on layer 1.5
@@ -357,6 +419,9 @@ func (s *StateDB) AddLog(log *types.Log) {
 	log.TxHash = s.thash
 	log.TxIndex = uint(s.txIndex)
 	log.Index = s.logSize
+	if s.hooks != nil && s.hooks.OnLog != nil {
+		s.hooks.OnLog(log)
+	}
 	s.logs[s.thash] = append(s.logs[s.thash], log)
 	s.logSize++
 }
@@ -1495,6 +1560,7 @@ func (s *StateDB) Commit(block uint64, failPostCommitFunc func(), postCommitFunc
 	}
 	// Finalize any pending changes and merge everything into the tries
 	var (
+		originRoot  = s.originalRoot
 		diffLayer   *types.DiffLayer
 		verified    chan struct{}
 		snapUpdated chan struct{}
@@ -1755,6 +1821,29 @@ func (s *StateDB) Commit(block uint64, failPostCommitFunc func(), postCommitFunc
 	}
 	if root == (common.Hash{}) {
 		root = types.EmptyRootHash
+	}
+	if originRoot == (common.Hash{}) {
+		originRoot = types.EmptyRootHash
+	}
+	if s.OnCommit != nil {
+		contracts := make(map[common.Hash][]byte)
+		for addr := range s.stateObjectsDirty {
+			obj := s.stateObjects[addr]
+			if obj == nil || obj.deleted {
+				continue
+			}
+			if obj.code != nil && obj.dirtyCode {
+				contracts[common.BytesToHash(obj.CodeHash())] = obj.code
+			}
+		}
+		destructs := make(map[common.Hash]struct{})
+		for addr, prev := range s.stateObjectsDestruct {
+			if prev == nil {
+				continue
+			}
+			destructs[crypto.Keccak256Hash(addr[:])] = struct{}{}
+		}
+		s.OnCommit(originRoot, root, destructs, s.accounts, s.accountsOrigin, s.storages, s.storagesOrigin, contracts)
 	}
 	// Clear all internal flags at the end of commit operation.
 	s.accounts = make(map[common.Hash][]byte)

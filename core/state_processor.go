@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/systemcontracts"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -59,38 +60,72 @@ func NewStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consen
 // returns the amount of gas that was used in the process. If any of the
 // transactions failed to execute due to insufficient gas it will return an error.
 func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (*state.StateDB, types.Receipts, []*types.Log, uint64, error) {
+	// Use named returns so we can guarantee OnBlockEnd(err) fires on all return
+	// paths (success and failure).
 	var (
-		usedGas     = new(uint64)
-		header      = block.Header()
-		blockHash   = block.Hash()
-		blockNumber = block.Number()
-		allLogs     []*types.Log
-		gp          = new(GasPool).AddGas(block.GasLimit())
+		outState *state.StateDB
+		receipts types.Receipts
+		allLogs  []*types.Log
+		err      error
+	)
+	outState = statedb
+
+	var (
+		header        = block.Header()
+		blockHash     = block.Hash()
+		blockNumber   = block.Number()
+		gp            = new(GasPool).AddGas(block.GasLimit())
+		usedGasCounter uint64
 	)
 
-	var receipts = make([]*types.Receipt, 0)
+	// Live tracing hooks: driven separately from opcode tracer (vm.Config.Tracer).
+	hooks := cfg.TraceHooks
+	if hooks != nil {
+		outState.SetHooks(hooks)
+		if hooks.OnBlockEnd != nil {
+			defer func() {
+				hooks.OnBlockEnd(err)
+			}()
+		}
+		if hooks.OnBlockStart != nil {
+			hooks.OnBlockStart(tracing.BlockEvent{Block: block})
+		}
+	}
+	vmctx := &tracing.VMContext{
+		Coinbase:    header.Coinbase,
+		BlockNumber: blockNumber,
+		Time:        header.Time,
+		Random:      nil,
+		BaseFee:     header.BaseFee,
+		StateDB:     outState,
+	}
+
+	receipts = make([]*types.Receipt, 0)
 	// Mutate the block and state according to any hard-fork specs
 	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
-		misc.ApplyDAOHardFork(statedb)
+		misc.ApplyDAOHardFork(outState)
 	}
 
 	lastBlock := p.bc.GetBlockByHash(block.ParentHash())
 	if lastBlock == nil {
-		return statedb, nil, nil, 0, errors.New("could not get parent block")
+		receipts = nil
+		allLogs = nil
+		err = errors.New("could not get parent block")
+		return outState, receipts, allLogs, usedGasCounter, err
 	}
 	if !p.config.IsFeynman(block.Number(), block.Time()) {
 		// Handle upgrade build-in system contract code
-		systemcontracts.UpgradeBuildInSystemContract(p.config, blockNumber, lastBlock.Time(), block.Time(), statedb)
+		systemcontracts.UpgradeBuildInSystemContract(p.config, blockNumber, lastBlock.Time(), block.Time(), outState)
 	}
 
 	var (
 		context = NewEVMBlockContext(header, p.bc, nil)
-		vmenv   = vm.NewEVM(context, vm.TxContext{}, statedb, p.config, cfg)
+		vmenv   = vm.NewEVM(context, vm.TxContext{}, outState, p.config, cfg)
 		signer  = types.MakeSigner(p.config, header.Number, header.Time)
 		txNum   = len(block.Transactions())
 	)
 	if beaconRoot := block.BeaconRoot(); beaconRoot != nil {
-		ProcessBeaconBlockRoot(*beaconRoot, vmenv, statedb)
+		ProcessBeaconBlockRoot(*beaconRoot, vmenv, outState)
 	}
 	// Iterate over and process the individual transactions
 	posa, isPoSA := p.engine.(consensus.PoSA)
@@ -98,16 +133,19 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 
 	// initialise bloom processors
 	bloomProcessors := NewAsyncReceiptBloomGenerator(txNum)
-	statedb.MarkFullProcessed()
+	outState.MarkFullProcessed()
 
 	// usually do have two tx, one for validator set contract, another for system reward contract.
 	systemTxs := make([]*types.Transaction, 0, 2)
 
 	for i, tx := range block.Transactions() {
 		if isPoSA {
-			if isSystemTx, err := posa.IsSystemTransaction(tx, block.Header()); err != nil {
+			if isSystemTx, e := posa.IsSystemTransaction(tx, block.Header()); e != nil {
 				bloomProcessors.Close()
-				return statedb, nil, nil, 0, err
+				receipts = nil
+				allLogs = nil
+				err = e
+				return outState, receipts, allLogs, usedGasCounter, err
 			} else if isSystemTx {
 				systemTxs = append(systemTxs, tx)
 				continue
@@ -116,21 +154,38 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		if p.config.IsCancun(block.Number(), block.Time()) {
 			if len(systemTxs) > 0 {
 				// systemTxs should be always at the end of block.
-				return statedb, nil, nil, 0, fmt.Errorf("normal tx %d [%v] after systemTx", i, tx.Hash().Hex())
+				receipts = nil
+				allLogs = nil
+				err = fmt.Errorf("normal tx %d [%v] after systemTx", i, tx.Hash().Hex())
+				return outState, receipts, allLogs, usedGasCounter, err
 			}
 		}
 
-		msg, err := TransactionToMessage(tx, signer, header.BaseFee)
-		if err != nil {
+		msg, e := TransactionToMessage(tx, signer, header.BaseFee)
+		if e != nil {
 			bloomProcessors.Close()
-			return statedb, nil, nil, 0, err
+			receipts = nil
+			allLogs = nil
+			err = e
+			return outState, receipts, allLogs, usedGasCounter, err
 		}
-		statedb.SetTxContext(tx.Hash(), i)
-
-		receipt, err := applyTransaction(msg, p.config, gp, statedb, blockNumber, blockHash, tx, usedGas, vmenv, bloomProcessors)
-		if err != nil {
+		outState.SetTxContext(tx.Hash(), i)
+		if hooks != nil && hooks.OnTxStart != nil {
+			hooks.OnTxStart(vmctx, tx, msg.From)
+		}
+		receipt, e := applyTransaction(msg, p.config, gp, outState, blockNumber, blockHash, tx, &usedGasCounter, vmenv, bloomProcessors)
+		if hooks != nil && hooks.OnTxEnd != nil {
+			if e == nil && receipt != nil {
+				receipt.SetEffectiveGasPrice(tx, header.BaseFee)
+			}
+			hooks.OnTxEnd(receipt, e)
+		}
+		if e != nil {
 			bloomProcessors.Close()
-			return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
+			receipts = nil
+			allLogs = nil
+			err = fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), e)
+			return outState, receipts, allLogs, usedGasCounter, err
 		}
 		commonTxs = append(commonTxs, tx)
 		receipts = append(receipts, receipt)
@@ -140,19 +195,23 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	// Fail if Shanghai not enabled and len(withdrawals) is non-zero.
 	withdrawals := block.Withdrawals()
 	if len(withdrawals) > 0 && !p.config.IsShanghai(block.Number(), block.Time()) {
-		return nil, nil, nil, 0, errors.New("withdrawals before shanghai")
+		outState = nil
+		receipts = nil
+		allLogs = nil
+		err = errors.New("withdrawals before shanghai")
+		return outState, receipts, allLogs, usedGasCounter, err
 	}
 
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
-	err := p.engine.Finalize(p.bc, header, statedb, &commonTxs, block.Uncles(), withdrawals, &receipts, &systemTxs, usedGas)
+	err = p.engine.Finalize(p.bc, header, outState, &commonTxs, block.Uncles(), withdrawals, &receipts, &systemTxs, &usedGasCounter)
 	if err != nil {
-		return statedb, receipts, allLogs, *usedGas, err
+		return outState, receipts, allLogs, usedGasCounter, err
 	}
 	for _, receipt := range receipts {
 		allLogs = append(allLogs, receipt.Logs...)
 	}
 
-	return statedb, receipts, allLogs, *usedGas, nil
+	return outState, receipts, allLogs, usedGasCounter, err
 }
 
 func applyTransaction(msg *Message, config *params.ChainConfig, gp *GasPool, statedb *state.StateDB, blockNumber *big.Int, blockHash common.Hash, tx *types.Transaction, usedGas *uint64, evm *vm.EVM, receiptProcessors ...ReceiptProcessor) (*types.Receipt, error) {

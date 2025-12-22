@@ -21,6 +21,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 )
@@ -34,6 +35,7 @@ var EVMInterpreterPool = sync.Pool{
 // Config are the configuration options for the Interpreter
 type Config struct {
 	Tracer                  EVMLogger // Opcode logger
+	TraceHooks              *tracing.Hooks
 	NoBaseFee               bool      // Forces the EIP-1559 baseFee to 0 (needed for 0 price calls)
 	NoRecursion             bool      // Disables call, callcode, delegate call and create
 	EnablePreimageRecording bool      // Enables recording of SHA3/keccak preimages
