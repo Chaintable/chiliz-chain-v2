@@ -49,7 +49,19 @@ const (
 	AccessListTxType = 0x01
 	DynamicFeeTxType = 0x02
 	BlobTxType       = 0x03
+	SetCodeTxType    = 0x04
 )
+
+// SetCodeAuthorization is a minimal compatibility stub for EIP-7702 style
+// transactions. This chain implementation does not currently expose these
+// authorizations, but some external tracers expect the type and accessors.
+type SetCodeAuthorization struct{}
+
+// Authority returns the authorized account address.
+// For this chain, it returns an error because SetCode authorizations are not supported.
+func (a SetCodeAuthorization) Authority() (common.Address, error) {
+	return common.Address{}, errors.New("setcode authorizations not supported")
+}
 
 // Transaction is an Ethereum transaction.
 type Transaction struct {
@@ -60,6 +72,12 @@ type Transaction struct {
 	hash atomic.Value
 	size atomic.Value
 	from atomic.Value
+}
+
+// SetCodeAuthorizations returns the embedded EIP-7702 authorizations, if any.
+// This chain does not support them, so it always returns nil.
+func (tx *Transaction) SetCodeAuthorizations() []SetCodeAuthorization {
+	return nil
 }
 
 // NewTx creates a new transaction.
