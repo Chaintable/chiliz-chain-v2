@@ -60,7 +60,7 @@ type SetCodeAuthorization struct{}
 // Authority returns the authorized account address.
 // For this chain, it returns an error because SetCode authorizations are not supported.
 func (a SetCodeAuthorization) Authority() (common.Address, error) {
-	return common.Address{}, errors.New("setcode authorizations not supported")
+	return common.Address{}, errors.New("SetCode authorizations not supported")
 }
 
 // Transaction is an Ethereum transaction.
