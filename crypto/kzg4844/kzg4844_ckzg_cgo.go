@@ -64,7 +64,8 @@ func ckzgInit() {
 func ckzgBlobToCommitment(blob Blob) (Commitment, error) {
 	ckzgIniter.Do(ckzgInit)
 
-	commitment, err := ckzg4844.BlobToKZGCommitment((ckzg4844.Blob)(blob))
+	bl := (ckzg4844.Blob)(blob)
+	commitment, err := ckzg4844.BlobToKZGCommitment(&bl)
 	if err != nil {
 		return Commitment{}, err
 	}
@@ -76,7 +77,8 @@ func ckzgBlobToCommitment(blob Blob) (Commitment, error) {
 func ckzgComputeProof(blob Blob, point Point) (Proof, Claim, error) {
 	ckzgIniter.Do(ckzgInit)
 
-	proof, claim, err := ckzg4844.ComputeKZGProof((ckzg4844.Blob)(blob), (ckzg4844.Bytes32)(point))
+	bl := (ckzg4844.Blob)(blob)
+	proof, claim, err := ckzg4844.ComputeKZGProof(&bl, (ckzg4844.Bytes32)(point))
 	if err != nil {
 		return Proof{}, Claim{}, err
 	}
@@ -105,7 +107,8 @@ func ckzgVerifyProof(commitment Commitment, point Point, claim Claim, proof Proo
 func ckzgComputeBlobProof(blob Blob, commitment Commitment) (Proof, error) {
 	ckzgIniter.Do(ckzgInit)
 
-	proof, err := ckzg4844.ComputeBlobKZGProof((ckzg4844.Blob)(blob), (ckzg4844.Bytes48)(commitment))
+	bl := (ckzg4844.Blob)(blob)
+	proof, err := ckzg4844.ComputeBlobKZGProof(&bl, (ckzg4844.Bytes48)(commitment))
 	if err != nil {
 		return Proof{}, err
 	}
@@ -116,7 +119,8 @@ func ckzgComputeBlobProof(blob Blob, commitment Commitment) (Proof, error) {
 func ckzgVerifyBlobProof(blob Blob, commitment Commitment, proof Proof) error {
 	ckzgIniter.Do(ckzgInit)
 
-	valid, err := ckzg4844.VerifyBlobKZGProof((ckzg4844.Blob)(blob), (ckzg4844.Bytes48)(commitment), (ckzg4844.Bytes48)(proof))
+	bl := (ckzg4844.Blob)(blob)
+	valid, err := ckzg4844.VerifyBlobKZGProof(&bl, (ckzg4844.Bytes48)(commitment), (ckzg4844.Bytes48)(proof))
 	if err != nil {
 		return err
 	}

@@ -50,7 +50,7 @@ func gokzgBlobToCommitment(blob Blob) (Commitment, error) {
 	gokzgIniter.Do(gokzgInit)
 
 	gblob := (gokzg4844.Blob)(blob)
-	commitment, err := context.BlobToKZGCommitment(&gblob, 0)
+	commitment, err := context.BlobToKZGCommitment(gblob, 0)
 	if err != nil {
 		return Commitment{}, err
 	}
@@ -63,7 +63,7 @@ func gokzgComputeProof(blob Blob, point Point) (Proof, Claim, error) {
 	gokzgIniter.Do(gokzgInit)
 
 	gblob := (gokzg4844.Blob)(blob)
-	proof, claim, err := context.ComputeKZGProof(&gblob, (gokzg4844.Scalar)(point), 0)
+	proof, claim, err := context.ComputeKZGProof(gblob, (gokzg4844.Scalar)(point), 0)
 	if err != nil {
 		return Proof{}, Claim{}, err
 	}
@@ -86,7 +86,7 @@ func gokzgComputeBlobProof(blob Blob, commitment Commitment) (Proof, error) {
 	gokzgIniter.Do(gokzgInit)
 
 	gblob := (gokzg4844.Blob)(blob)
-	proof, err := context.ComputeBlobKZGProof(&gblob, (gokzg4844.KZGCommitment)(commitment), 0)
+	proof, err := context.ComputeBlobKZGProof(gblob, (gokzg4844.KZGCommitment)(commitment), 0)
 	if err != nil {
 		return Proof{}, err
 	}
@@ -98,5 +98,5 @@ func gokzgVerifyBlobProof(blob Blob, commitment Commitment, proof Proof) error {
 	gokzgIniter.Do(gokzgInit)
 
 	gblob := (gokzg4844.Blob)(blob)
-	return context.VerifyBlobKZGProof(&gblob, (gokzg4844.KZGCommitment)(commitment), (gokzg4844.KZGProof)(proof))
+	return context.VerifyBlobKZGProof(gblob, (gokzg4844.KZGCommitment)(commitment), (gokzg4844.KZGProof)(proof))
 }
