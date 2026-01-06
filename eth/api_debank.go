@@ -196,7 +196,7 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	}
 
 	if root != block.Header().Root {
-		return nil, fmt.Errorf("state root mismatch: expected %x, got %x", block.Header().Root, root)
+		return nil, fmt.Errorf("state root mismatch: expected %s, got %s", block.Header().Root.Hex(), root.Hex())
 	}
 
 	parentRoot := parent.Root()
