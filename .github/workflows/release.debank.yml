@@ -10,7 +10,7 @@ env:
   AWS_REGION: ap-northeast-1
   REGISTRY: 294354037686.dkr.ecr.ap-northeast-1.amazonaws.com
   IMAGE: blockchain-chiliz-v2
-  DOCKERFILE: Dockerfile.debank
+  DOCKERFILE: Dockerfile
 
 jobs:
   build-artifacts:
