@@ -1,0 +1,208 @@
+package tracing
+
+import (
+	"errors"
+	"math/big"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/holiman/uint256"
+)
+
+// BlockEvent is a minimal compatibility wrapper used by hook-based tracers.
+type BlockEvent struct {
+	Block *types.Block
+}
+
+// VMContext contains contextual information about an EVM execution.
+// It is used by hook-based tracers which require access to StateDB and block info.
+type VMContext struct {
+	StateDB     StateDB
+	Coinbase    common.Address
+	BlockNumber *big.Int
+	Time        uint64
+	BlockHash   common.Hash
+	TxHash      common.Hash
+	TxIndex     int
+	BaseFee     *big.Int
+	BlobBaseFee *big.Int
+	GasLimit    uint64
+	ChainID     *big.Int
+	Random      *common.Hash
+	Difficulty  *big.Int
+}
+
+// OpContext is a minimal interface exposed to hook-based tracers for opcode-level
+// inspection.
+type OpContext interface {
+	StackData() []uint256.Int
+	MemoryData() []byte
+	Address() common.Address
+}
+
+type scopeOpContext struct {
+	scope *vm.ScopeContext
+}
+
+func (c scopeOpContext) StackData() []uint256.Int {
+	if c.scope == nil || c.scope.Stack == nil {
+		return nil
+	}
+	return c.scope.Stack.Data()
+}
+
+func (c scopeOpContext) MemoryData() []byte {
+	if c.scope == nil || c.scope.Memory == nil {
+		return nil
+	}
+	return c.scope.Memory.Data()
+}
+
+func (c scopeOpContext) Address() common.Address {
+	if c.scope == nil || c.scope.Contract == nil {
+		return common.Address{}
+	}
+	return c.scope.Contract.Address()
+}
+
+// Hooks provides a hook-style tracer API while implementing vm.EVMLogger for this codebase.
+//
+// Transaction-level hooks (OnTxStart/OnTxEnd) are invoked by core.ApplyTransactionWithEVM.
+type Hooks struct {
+	OnTxStart func(env *VMContext, tx *types.Transaction, from common.Address)
+	OnTxEnd   func(receipt *types.Receipt, err error)
+
+	OnEnter  func(depth int, typ byte, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int)
+	OnExit   func(depth int, output []byte, gasUsed uint64, err error, reverted bool)
+	OnOpcode func(pc uint64, opcode byte, gas, cost uint64, scope OpContext, rData []byte, depth int, err error)
+	OnLog    func(log *types.Log)
+
+	logIndex uint
+}
+
+func (h *Hooks) CaptureTxStart(gasLimit uint64)         {}
+func (h *Hooks) CaptureTxEnd(restGas uint64)            {}
+func (h *Hooks) CaptureSystemTxEnd(intrinsicGas uint64) {}
+
+func (h *Hooks) CaptureStart(env *vm.EVM, from, to common.Address, create bool, input []byte, gas uint64, value *big.Int) {
+	if h == nil {
+		return
+	}
+	h.logIndex = 0
+	if h.OnEnter != nil {
+		typ := byte(vm.CALL)
+		if create {
+			typ = byte(vm.CREATE)
+		}
+		h.OnEnter(0, typ, from, to, input, gas, value)
+	}
+}
+
+func (h *Hooks) CaptureEnd(output []byte, gasUsed uint64, err error) {
+	if h == nil {
+		return
+	}
+	if h.OnExit != nil {
+		h.OnExit(0, output, gasUsed, err, errors.Is(err, vm.ErrExecutionReverted))
+	}
+}
+
+func (h *Hooks) CaptureEnter(typ vm.OpCode, from, to common.Address, input []byte, gas uint64, value *big.Int) {
+	if h == nil {
+		return
+	}
+	if h.OnEnter != nil {
+		// Depth is supplied on opcode callbacks; for enter/exit we use -1.
+		h.OnEnter(-1, byte(typ), from, to, input, gas, value)
+	}
+}
+
+func (h *Hooks) CaptureExit(output []byte, gasUsed uint64, err error) {
+	if h == nil {
+		return
+	}
+	if h.OnExit != nil {
+		h.OnExit(-1, output, gasUsed, err, errors.Is(err, vm.ErrExecutionReverted))
+	}
+}
+
+func (h *Hooks) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, scope *vm.ScopeContext, rData []byte, depth int, err error) {
+	if h == nil {
+		return
+	}
+	ctx := scopeOpContext{scope: scope}
+	if h.OnOpcode != nil {
+		h.OnOpcode(pc, byte(op), gas, cost, ctx, rData, depth, err)
+	}
+	if h.OnLog != nil {
+		h.captureLogIfAny(op, ctx)
+	}
+}
+
+func (h *Hooks) CaptureFault(pc uint64, op vm.OpCode, gas, cost uint64, scope *vm.ScopeContext, depth int, err error) {
+	if h == nil {
+		return
+	}
+	if h.OnOpcode != nil {
+		h.OnOpcode(pc, byte(op), gas, cost, scopeOpContext{scope: scope}, nil, depth, err)
+	}
+}
+
+func (h *Hooks) captureLogIfAny(op vm.OpCode, ctx scopeOpContext) {
+	if op < vm.LOG0 || op > vm.LOG4 {
+		return
+	}
+	stack := ctx.StackData()
+	mem := ctx.MemoryData()
+	count := int(op - vm.LOG0)
+	if len(stack) < 2+count {
+		return
+	}
+	mstart := stack[len(stack)-2-count].Uint64()
+	msize := stack[len(stack)-1-count].Uint64()
+	data := getMemoryCopyPadded(mem, int64(mstart), int64(msize))
+
+	topics := make([]common.Hash, 0, count)
+	for i := 0; i < count; i++ {
+		topic := common.Hash(stack[len(stack)-count+i].Bytes32())
+		topics = append(topics, topic)
+	}
+	l := &types.Log{
+		Address: ctx.Address(),
+		Topics:  topics,
+		Data:    data,
+		Index:   h.logIndex,
+	}
+	h.logIndex++
+	h.OnLog(l)
+}
+
+func getMemoryCopyPadded(m []byte, offset, size int64) []byte {
+	if offset < 0 || size <= 0 {
+		return nil
+	}
+
+	// Avoid pathological allocations during tracing.
+	const memoryPadLimit = 1024 * 1024
+	if size > memoryPadLimit {
+		return nil
+	}
+
+	length := int64(len(m))
+	if offset >= length {
+		return make([]byte, size)
+	}
+	end := offset + size
+	if end <= length {
+		cpy := make([]byte, size)
+		copy(cpy, m[offset:end])
+		return cpy
+	}
+	cpy := make([]byte, size)
+	available := length - offset
+	if available > 0 {
+		copy(cpy, m[offset:offset+available])
+	}
+	return cpy
+}

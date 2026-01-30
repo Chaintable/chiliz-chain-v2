@@ -1,7 +1,11 @@
 # Build Geth in a stock Go builder container
-FROM golang:1.21-alpine as builder
+FROM golang:1.24-alpine as builder
 
 RUN apk add --no-cache make cmake gcc musl-dev linux-headers git bash build-base libc-dev libstdc++
+
+ARG ACCESS_TOKEN
+
+RUN git config --global url."https://x-access-token:${ACCESS_TOKEN}@github.com".insteadOf "https://github.com"
 
 COPY go.mod /go-ethereum/
 COPY go.sum /go-ethereum/

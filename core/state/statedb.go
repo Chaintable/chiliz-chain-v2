@@ -1925,3 +1925,51 @@ func copy2DSet[k comparable](set map[k]map[common.Hash][]byte) map[k]map[common.
 	}
 	return copied
 }
+
+func (s *StateDB) StateDiff(deleteEmptyObjects bool) (root common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storages map[common.Hash]map[common.Hash][]byte, codes map[common.Hash][]byte, err error) {
+	root = s.IntermediateRoot(deleteEmptyObjects)
+	destructs = make(map[common.Hash]struct{})
+	accounts = make(map[common.Hash][]byte)
+	storages = make(map[common.Hash]map[common.Hash][]byte)
+	codes = make(map[common.Hash][]byte)
+	encode := func(val common.Hash) []byte {
+		if val == (common.Hash{}) {
+			return nil
+		}
+		blob, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val[:]))
+		return blob
+	}
+
+	for addr, prev := range s.stateObjectsDestruct {
+		if prev == nil {
+			continue
+		}
+		addrHash := crypto.Keccak256Hash(addr[:])
+		destructs[addrHash] = struct{}{}
+	}
+	for addr := range s.stateObjectsDirty {
+		obj := s.stateObjects[addr]
+		if obj == nil {
+			panic("missing state object")
+		}
+		if obj.deleted {
+			continue
+		}
+		addrHash := obj.addrHash
+		accounts[addrHash] = types.SlimAccountRLP(obj.data)
+		if obj.dirtyCode {
+			codes[common.Hash(obj.CodeHash())] = common.CopyBytes(obj.code)
+		}
+		for key, val := range obj.pendingStorage {
+			if val == obj.originStorage[key] {
+				continue
+			}
+			slotHash := crypto.Keccak256Hash(key[:])
+			if _, ok := storages[addrHash]; !ok {
+				storages[addrHash] = make(map[common.Hash][]byte)
+			}
+			storages[addrHash][slotHash] = encode(val)
+		}
+	}
+	return
+}
