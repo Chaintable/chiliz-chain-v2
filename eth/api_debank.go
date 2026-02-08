@@ -171,8 +171,10 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	// We need this because PoSA finalization executes system messages without a tracer.
 	usedGasBeforeFinalize := *usedGas
 	var traceStateCopy *state.StateDB
+	var traceSystemTxs []*types.Transaction
 	if isPoSA && len(systemTxs) > 0 {
 		traceStateCopy = statedb.Copy()
+		traceSystemTxs = append(traceSystemTxs, systemTxs...)
 	}
 
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards, system txs).
@@ -185,7 +187,7 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	// detailed opcode/call traces for systemTx execution.
 	if traceStateCopy != nil {
 		traceEVM := vm.NewEVM(blockCtx, vm.TxContext{}, traceStateCopy, chainConfig, vm.Config{Tracer: hooks})
-		if err := tracePoSASystemTxs(traceEVM, traceStateCopy, hooks, chainConfig, parent, block, signer, posa, usedGasBeforeFinalize, commonTxs, systemTxs); err != nil {
+		if err := tracePoSASystemTxs(traceEVM, traceStateCopy, hooks, chainConfig, parent, block, signer, posa, usedGasBeforeFinalize, commonTxs, traceSystemTxs); err != nil {
 			return nil, err
 		}
 	}
