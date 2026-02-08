@@ -3,13 +3,11 @@ package eth
 import (
 	"context"
 	"fmt"
-	"math/big"
 	"strings"
 
 	ptracer "github.com/Chaintable/pipeline/tracer"
 	ptypes "github.com/Chaintable/pipeline/types"
 	"github.com/Chaintable/pipeline/util"
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core"
@@ -20,13 +18,23 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
-	"github.com/holiman/uint256"
 )
 
 type DebankAPI struct {
 	eth *Ethereum
+}
+
+type posaSystemTxReplayer interface {
+	ReplaySystemTransactions(
+		chain consensus.ChainHeaderReader,
+		header *types.Header,
+		state *state.StateDB,
+		commonTxs []*types.Transaction,
+		systemTxs []*types.Transaction,
+		usedGasStart uint64,
+		hooks *tracing.Hooks,
+	) error
 }
 
 func NewDebankAPI(eth *Ethereum) *DebankAPI {
@@ -124,10 +132,17 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 		receipts = make([]*types.Receipt, 0, len(txs))
 	)
 	posa, isPoSA := api.eth.engine.(consensus.PoSA)
+	var systemReplayer posaSystemTxReplayer
+	if isPoSA {
+		var ok bool
+		systemReplayer, ok = api.eth.engine.(posaSystemTxReplayer)
+		if !ok {
+			return nil, fmt.Errorf("PoSA engine %T does not support ReplaySystemTransactions", api.eth.engine)
+		}
+	}
 	commonTxs := make([]*types.Transaction, 0, len(txs))
 	// usually do have two tx, one for validator set contract, another for system reward contract.
 	systemTxs := make([]*types.Transaction, 0, 2)
-	systemTxIndices := make([]int, 0, 2)
 
 	for i, tx := range txs {
 		if isPoSA {
@@ -137,7 +152,6 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 			}
 			if isSystemTx {
 				systemTxs = append(systemTxs, tx)
-				systemTxIndices = append(systemTxIndices, i)
 				continue
 			}
 		}
@@ -174,11 +188,9 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	usedGasBeforeFinalize := *usedGas
 	var traceStateCopy *state.StateDB
 	var traceSystemTxs []*types.Transaction
-	var traceSystemTxIndices []int
 	if isPoSA && len(systemTxs) > 0 {
 		traceStateCopy = statedb.Copy()
 		traceSystemTxs = append(traceSystemTxs, systemTxs...)
-		traceSystemTxIndices = append(traceSystemTxIndices, systemTxIndices...)
 	}
 
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards, system txs).
@@ -190,8 +202,8 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	// This keeps state/root aligned to consensus (Finalize result), while still producing
 	// detailed opcode/call traces for systemTx execution.
 	if traceStateCopy != nil {
-		traceEVM := vm.NewEVM(blockCtx, vm.TxContext{}, traceStateCopy, chainConfig, vm.Config{Tracer: hooks})
-		if err := tracePoSASystemTxs(traceEVM, traceStateCopy, hooks, chainConfig, parent, block, signer, posa, usedGasBeforeFinalize, commonTxs, traceSystemTxs, traceSystemTxIndices); err != nil {
+		// System tx is replayed by Parlia consensus path for consistency.
+		if err := systemReplayer.ReplaySystemTransactions(api.eth.blockchain, block.Header(), traceStateCopy, commonTxs, traceSystemTxs, usedGasBeforeFinalize, hooks); err != nil {
 			return nil, err
 		}
 	}
@@ -210,137 +222,4 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	res := rpcTracer.GetOutPut(parentRoot, root, destructs, accounts, storages, codes)
 
 	return res, nil
-}
-
-// tracePoSASystemTxs replays PoSA system transactions on a copied state with hooks enabled.
-// It intentionally bypasses GasPool semantics and executes the transaction payload via EVM.Call
-// similar to Parlia's internal applyMessage path.
-func tracePoSASystemTxs(
-	evmenv *vm.EVM,
-	statedb *state.StateDB,
-	hooks *tracing.Hooks,
-	chainConfig *params.ChainConfig,
-	parent *types.Block,
-	block *types.Block,
-	signer types.Signer,
-	posa consensus.PoSA,
-	usedGasStart uint64,
-	commonTxs []*types.Transaction,
-	systemTxs []*types.Transaction,
-	systemTxIndices []int,
-) error {
-	if len(systemTxs) != len(systemTxIndices) {
-		return fmt.Errorf("system tx/index mismatch: txs=%d indices=%d", len(systemTxs), len(systemTxIndices))
-	}
-
-	// Note: statedb is a copy, safe to mutate.
-	var (
-		beforeSystemTx = true
-		cumulativeGas  = usedGasStart
-	)
-	for j, tx := range systemTxs {
-		// Apply PoSA system-tx pre-processing matching eth/tracers/api.go (trace-only).
-		if beforeSystemTx {
-			balance := statedb.GetBalance(consensus.SystemAddress)
-			if balance != nil && balance.Cmp(common.U2560) > 0 {
-				statedb.SetBalance(consensus.SystemAddress, uint256.NewInt(0))
-				statedb.AddBalance(evmenv.Context.Coinbase, balance)
-			}
-			if chainConfig.IsFeynman(block.Number(), block.Time()) {
-				systemcontracts.UpgradeBuildInSystemContract(chainConfig, block.Number(), parent.Time(), block.Time(), statedb)
-			}
-			beforeSystemTx = false
-		}
-		if posa != nil {
-			if posa.IsTokenomicsDeposit(tx.To(), tx.Data()) {
-				statedb.AddBalance(evmenv.Context.Coinbase, uint256.MustFromBig(tx.Value()))
-			}
-			if posa.IsPepper8Block(block.Time(), parent.Time()) {
-				statedb.AddBalance(evmenv.Context.Coinbase, uint256.MustFromBig(posa.GetPepper8MintAmount()))
-			}
-		}
-
-		msg, err := core.TransactionToMessage(tx, signer, evmenv.Context.BaseFee)
-		if err != nil {
-			return fmt.Errorf("could not build message for system tx %d [%v]: %w", j, tx.Hash().Hex(), err)
-		}
-		// Preserve original block tx index for stable trace ordering even when system txs are consumed by Finalize.
-		txIndex := systemTxIndices[j]
-		statedb.SetTxContext(tx.Hash(), txIndex)
-		evmenv.Reset(core.NewEVMTxContext(msg), statedb)
-
-		// Hook-based tracers need explicit tx boundaries with the transaction object.
-		if hooks != nil && hooks.OnTxStart != nil {
-			vmctx := &tracing.VMContext{
-				StateDB:     statedb,
-				Coinbase:    evmenv.Context.Coinbase,
-				BlockNumber: new(big.Int).Set(evmenv.Context.BlockNumber),
-				Time:        evmenv.Context.Time,
-				BlockHash:   block.Hash(),
-				TxHash:      tx.Hash(),
-				TxIndex:     statedb.TxIndex(),
-				BaseFee:     evmenv.Context.BaseFee,
-				BlobBaseFee: evmenv.Context.BlobBaseFee,
-				GasLimit:    evmenv.Context.GasLimit,
-				ChainID:     evmenv.ChainConfig().ChainID,
-				Random:      evmenv.Context.Random,
-				Difficulty:  evmenv.Context.Difficulty,
-			}
-			hooks.OnTxStart(vmctx, tx, msg.From)
-		}
-
-		// Mimic Parlia applyMessage: prepare rules (Cancun), increment nonce, then execute via EVM.Call.
-		if chainConfig.IsCancun(block.Number(), block.Time()) {
-			rules := evmenv.ChainConfig().Rules(evmenv.Context.BlockNumber, evmenv.Context.Random != nil, evmenv.Context.Time)
-			statedb.Prepare(rules, msg.From, evmenv.Context.Coinbase, msg.To, vm.ActivePrecompiles(rules), msg.AccessList)
-		}
-		statedb.SetNonce(msg.From, statedb.GetNonce(msg.From)+1)
-
-		var (
-			gas      = msg.GasLimit
-			gasUsed  uint64
-			callErr  error
-			receipt  *types.Receipt
-			postRoot []byte
-		)
-		if msg.To == nil {
-			_, _, leftOverGas, err := evmenv.Create(vm.AccountRef(msg.From), msg.Data, gas, uint256.MustFromBig(msg.Value))
-			gasUsed = gas - leftOverGas
-			callErr = err
-		} else {
-			_, leftOverGas, err := evmenv.Call(vm.AccountRef(msg.From), *msg.To, msg.Data, gas, uint256.MustFromBig(msg.Value))
-			gasUsed = gas - leftOverGas
-			callErr = err
-		}
-		cumulativeGas += gasUsed
-
-		// Finalise/write changes similarly to consensus path.
-		if chainConfig.IsByzantium(block.Number()) {
-			statedb.Finalise(true)
-		} else {
-			postRoot = statedb.IntermediateRoot(chainConfig.IsEIP158(block.Number())).Bytes()
-		}
-
-		receipt = &types.Receipt{Type: tx.Type(), PostState: postRoot, CumulativeGasUsed: cumulativeGas}
-		if callErr != nil {
-			receipt.Status = types.ReceiptStatusFailed
-		} else {
-			receipt.Status = types.ReceiptStatusSuccessful
-		}
-		receipt.TxHash = tx.Hash()
-		receipt.GasUsed = gasUsed
-		receipt.BlockHash = block.Hash()
-		receipt.BlockNumber = block.Number()
-		receipt.TransactionIndex = uint(statedb.TxIndex())
-		receipt.Logs = statedb.GetLogs(tx.Hash(), block.NumberU64(), block.Hash())
-		receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
-
-		if hooks != nil && hooks.OnTxEnd != nil {
-			hooks.OnTxEnd(receipt, callErr)
-		}
-		if callErr != nil {
-			return fmt.Errorf("could not replay system tx %d [%v]: %w", j, tx.Hash().Hex(), callErr)
-		}
-	}
-	return nil
 }

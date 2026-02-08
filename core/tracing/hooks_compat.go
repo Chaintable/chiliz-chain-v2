@@ -78,7 +78,8 @@ type Hooks struct {
 	OnOpcode func(pc uint64, opcode byte, gas, cost uint64, scope OpContext, rData []byte, depth int, err error)
 	OnLog    func(log *types.Log)
 
-	logIndex uint
+	logIndex      uint
+	logFrameStack []uint
 }
 
 func (h *Hooks) CaptureTxStart(gasLimit uint64)         {}
@@ -90,6 +91,8 @@ func (h *Hooks) CaptureStart(env *vm.EVM, from, to common.Address, create bool, 
 		return
 	}
 	h.logIndex = 0
+	h.logFrameStack = h.logFrameStack[:0]
+	h.pushLogFrame()
 	if h.OnEnter != nil {
 		typ := byte(vm.CALL)
 		if create {
@@ -103,6 +106,7 @@ func (h *Hooks) CaptureEnd(output []byte, gasUsed uint64, err error) {
 	if h == nil {
 		return
 	}
+	h.popLogFrame(err != nil)
 	if h.OnExit != nil {
 		h.OnExit(0, output, gasUsed, err, errors.Is(err, vm.ErrExecutionReverted))
 	}
@@ -112,6 +116,7 @@ func (h *Hooks) CaptureEnter(typ vm.OpCode, from, to common.Address, input []byt
 	if h == nil {
 		return
 	}
+	h.pushLogFrame()
 	if h.OnEnter != nil {
 		// Depth is supplied on opcode callbacks; for enter/exit we use -1.
 		h.OnEnter(-1, byte(typ), from, to, input, gas, value)
@@ -122,8 +127,24 @@ func (h *Hooks) CaptureExit(output []byte, gasUsed uint64, err error) {
 	if h == nil {
 		return
 	}
+	h.popLogFrame(err != nil)
 	if h.OnExit != nil {
 		h.OnExit(-1, output, gasUsed, err, errors.Is(err, vm.ErrExecutionReverted))
+	}
+}
+
+func (h *Hooks) pushLogFrame() {
+	h.logFrameStack = append(h.logFrameStack, h.logIndex)
+}
+
+func (h *Hooks) popLogFrame(reverted bool) {
+	if len(h.logFrameStack) == 0 {
+		return
+	}
+	start := h.logFrameStack[len(h.logFrameStack)-1]
+	h.logFrameStack = h.logFrameStack[:len(h.logFrameStack)-1]
+	if reverted {
+		h.logIndex = start
 	}
 }
 
@@ -183,21 +204,32 @@ func getMemoryCopyPadded(m []byte, offset, size int64) []byte {
 		return nil
 	}
 
-	// Avoid pathological allocations during tracing.
+	// Avoid pathological zero-padding during tracing while preserving
+	// large in-memory log data.
 	const memoryPadLimit = 1024 * 1024
-	if size > memoryPadLimit {
+	const maxInt = int64(^uint(0) >> 1)
+	if size > maxInt {
+		return nil
+	}
+	end := offset + size
+	if end < offset { // int64 overflow
 		return nil
 	}
 
 	length := int64(len(m))
 	if offset >= length {
+		if size > memoryPadLimit {
+			return nil
+		}
 		return make([]byte, size)
 	}
-	end := offset + size
 	if end <= length {
 		cpy := make([]byte, size)
 		copy(cpy, m[offset:end])
 		return cpy
+	}
+	if end-length > memoryPadLimit {
+		return nil
 	}
 	cpy := make([]byte, size)
 	available := length - offset
