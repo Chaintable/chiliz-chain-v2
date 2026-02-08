@@ -159,13 +159,13 @@ func (h *Hooks) captureLogIfAny(op vm.OpCode, ctx scopeOpContext) {
 	if len(stack) < 2+count {
 		return
 	}
-	mstart := stack[len(stack)-2-count].Uint64()
-	msize := stack[len(stack)-1-count].Uint64()
+	mstart := stack[len(stack)-1].Uint64()
+	msize := stack[len(stack)-2].Uint64()
 	data := getMemoryCopyPadded(mem, int64(mstart), int64(msize))
 
 	topics := make([]common.Hash, 0, count)
 	for i := 0; i < count; i++ {
-		topic := common.Hash(stack[len(stack)-count+i].Bytes32())
+		topic := common.Hash(stack[len(stack)-2-(i+1)].Bytes32())
 		topics = append(topics, topic)
 	}
 	l := &types.Log{

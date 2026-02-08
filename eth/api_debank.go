@@ -127,6 +127,7 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	commonTxs := make([]*types.Transaction, 0, len(txs))
 	// usually do have two tx, one for validator set contract, another for system reward contract.
 	systemTxs := make([]*types.Transaction, 0, 2)
+	systemTxIndices := make([]int, 0, 2)
 
 	for i, tx := range txs {
 		if isPoSA {
@@ -136,6 +137,7 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 			}
 			if isSystemTx {
 				systemTxs = append(systemTxs, tx)
+				systemTxIndices = append(systemTxIndices, i)
 				continue
 			}
 		}
@@ -171,8 +173,12 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	// We need this because PoSA finalization executes system messages without a tracer.
 	usedGasBeforeFinalize := *usedGas
 	var traceStateCopy *state.StateDB
+	var traceSystemTxs []*types.Transaction
+	var traceSystemTxIndices []int
 	if isPoSA && len(systemTxs) > 0 {
 		traceStateCopy = statedb.Copy()
+		traceSystemTxs = append(traceSystemTxs, systemTxs...)
+		traceSystemTxIndices = append(traceSystemTxIndices, systemTxIndices...)
 	}
 
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards, system txs).
@@ -185,7 +191,7 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	// detailed opcode/call traces for systemTx execution.
 	if traceStateCopy != nil {
 		traceEVM := vm.NewEVM(blockCtx, vm.TxContext{}, traceStateCopy, chainConfig, vm.Config{Tracer: hooks})
-		if err := tracePoSASystemTxs(traceEVM, traceStateCopy, hooks, chainConfig, parent, block, signer, posa, usedGasBeforeFinalize, commonTxs, systemTxs); err != nil {
+		if err := tracePoSASystemTxs(traceEVM, traceStateCopy, hooks, chainConfig, parent, block, signer, posa, usedGasBeforeFinalize, commonTxs, traceSystemTxs, traceSystemTxIndices); err != nil {
 			return nil, err
 		}
 	}
@@ -221,7 +227,12 @@ func tracePoSASystemTxs(
 	usedGasStart uint64,
 	commonTxs []*types.Transaction,
 	systemTxs []*types.Transaction,
+	systemTxIndices []int,
 ) error {
+	if len(systemTxs) != len(systemTxIndices) {
+		return fmt.Errorf("system tx/index mismatch: txs=%d indices=%d", len(systemTxs), len(systemTxIndices))
+	}
+
 	// Note: statedb is a copy, safe to mutate.
 	var (
 		beforeSystemTx = true
@@ -253,8 +264,8 @@ func tracePoSASystemTxs(
 		if err != nil {
 			return fmt.Errorf("could not build message for system tx %d [%v]: %w", j, tx.Hash().Hex(), err)
 		}
-		// Parlia applies system txs with a synthetic tx-index based on the common tx count.
-		txIndex := len(commonTxs) + j
+		// Preserve original block tx index for stable trace ordering even when system txs are consumed by Finalize.
+		txIndex := systemTxIndices[j]
 		statedb.SetTxContext(tx.Hash(), txIndex)
 		evmenv.Reset(core.NewEVMTxContext(msg), statedb)
 
