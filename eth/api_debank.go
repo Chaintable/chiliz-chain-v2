@@ -240,12 +240,12 @@ func tracePoSASystemTxs(
 	)
 	for j, tx := range systemTxs {
 		// Apply PoSA system-tx pre-processing matching eth/tracers/api.go (trace-only).
+		balance := statedb.GetBalance(consensus.SystemAddress)
+		if balance != nil && balance.Cmp(common.U2560) > 0 {
+			statedb.SetBalance(consensus.SystemAddress, uint256.NewInt(0))
+			statedb.AddBalance(evmenv.Context.Coinbase, balance)
+		}
 		if beforeSystemTx {
-			balance := statedb.GetBalance(consensus.SystemAddress)
-			if balance != nil && balance.Cmp(common.U2560) > 0 {
-				statedb.SetBalance(consensus.SystemAddress, uint256.NewInt(0))
-				statedb.AddBalance(evmenv.Context.Coinbase, balance)
-			}
 			if chainConfig.IsFeynman(block.Number(), block.Time()) {
 				systemcontracts.UpgradeBuildInSystemContract(chainConfig, block.Number(), parent.Time(), block.Time(), statedb)
 			}
