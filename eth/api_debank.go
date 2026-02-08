@@ -191,7 +191,7 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	// detailed opcode/call traces for systemTx execution.
 	if traceStateCopy != nil {
 		traceEVM := vm.NewEVM(blockCtx, vm.TxContext{}, traceStateCopy, chainConfig, vm.Config{Tracer: hooks})
-		if err := tracePoSASystemTxs(traceEVM, traceStateCopy, hooks, chainConfig, parent, block, signer, posa, usedGasBeforeFinalize, commonTxs, traceSystemTxs, traceSystemTxIndices); err != nil {
+		if err := tracePoSASystemTxs(traceEVM, traceStateCopy, hooks, chainConfig, parent, block, posa, usedGasBeforeFinalize, commonTxs, traceSystemTxs, traceSystemTxIndices); err != nil {
 			return nil, err
 		}
 	}
@@ -222,7 +222,6 @@ func tracePoSASystemTxs(
 	chainConfig *params.ChainConfig,
 	parent *types.Block,
 	block *types.Block,
-	signer types.Signer,
 	posa consensus.PoSA,
 	usedGasStart uint64,
 	commonTxs []*types.Transaction,
@@ -260,9 +259,22 @@ func tracePoSASystemTxs(
 			}
 		}
 
-		msg, err := core.TransactionToMessage(tx, signer, evmenv.Context.BaseFee)
-		if err != nil {
-			return fmt.Errorf("could not build message for system tx %d [%v]: %w", j, tx.Hash().Hex(), err)
+		// Parlia executes system messages from coinbase directly (not recovered sender).
+		// Keep replay sender aligned with consensus path.
+		msg := &core.Message{
+			To:                tx.To(),
+			From:              evmenv.Context.Coinbase,
+			Nonce:             tx.Nonce(),
+			Value:             tx.Value(),
+			GasLimit:          tx.Gas(),
+			GasPrice:          common.Big0,
+			GasFeeCap:         tx.GasFeeCap(),
+			GasTipCap:         tx.GasTipCap(),
+			Data:              tx.Data(),
+			AccessList:        tx.AccessList(),
+			BlobGasFeeCap:     tx.BlobGasFeeCap(),
+			BlobHashes:        tx.BlobHashes(),
+			SkipAccountChecks: true,
 		}
 		// Preserve original block tx index for stable trace ordering even when system txs are consumed by Finalize.
 		txIndex := systemTxIndices[j]
@@ -295,6 +307,23 @@ func tracePoSASystemTxs(
 			statedb.Prepare(rules, msg.From, evmenv.Context.Coinbase, msg.To, vm.ActivePrecompiles(rules), msg.AccessList)
 		}
 		statedb.SetNonce(msg.From, statedb.GetNonce(msg.From)+1)
+
+		// Trace-only safety net: if replay pre-processing missed funding steps, top up
+		// sender on the copied state to avoid aborting the whole Debank block trace.
+		if value, overflow := uint256.FromBig(msg.Value); !overflow && value != nil {
+			have := statedb.GetBalance(msg.From)
+			if have.Cmp(value) < 0 {
+				deficit := new(uint256.Int).Sub(value, have)
+				statedb.AddBalance(msg.From, deficit)
+				log.Warn("trace replay topped up system sender balance",
+					"tx", tx.Hash(),
+					"from", msg.From,
+					"need", msg.Value,
+					"have", have.ToBig(),
+					"deficit", deficit.ToBig(),
+				)
+			}
+		}
 
 		var (
 			gas      = msg.GasLimit
