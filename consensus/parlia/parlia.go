@@ -2180,7 +2180,7 @@ func (p *Parlia) distributeIncoming(val common.Address, state *state.StateDB, he
 				return err
 			}
 			log.Trace("distribute to system reward pool", "block hash", header.Hash(), "amount", rewards)
-			balance = balance.Sub(balance, uint256.MustFromBig(rewards))
+			balance = new(uint256.Int).Sub(balance, uint256.MustFromBig(rewards))
 		}
 	}
 	log.Trace("distribute to validator contract", "block hash", header.Hash(), "amount", balance)
