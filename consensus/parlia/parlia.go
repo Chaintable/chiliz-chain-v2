@@ -2180,7 +2180,7 @@ func (p *Parlia) distributeIncoming(val common.Address, state *state.StateDB, he
 				return err
 			}
 			log.Trace("distribute to system reward pool", "block hash", header.Hash(), "amount", rewards)
-			balance = balance.Sub(balance, uint256.MustFromBig(rewards))
+			balance = new(uint256.Int).Sub(balance, uint256.MustFromBig(rewards))
 		}
 	}
 	log.Trace("distribute to validator contract", "block hash", header.Hash(), "amount", balance)
@@ -2342,6 +2342,43 @@ func (p *Parlia) applyTransaction(
 			vmCfg = *cc.vmConfig
 		}
 	}
+
+	// Notify hook-based tracers of system-tx boundaries so that traces/events
+	// are properly attributed to this transaction (mirrors ApplyTransactionWithEVM).
+	var (
+		hooks   *tracing.Hooks
+		receipt *types.Receipt
+	)
+	if h, ok := vmCfg.Tracer.(*tracing.Hooks); ok {
+		hooks = h
+	}
+	if hooks != nil {
+		if hooks.OnTxStart != nil {
+			blockCtx := core.NewEVMBlockContext(header, chainCtx, nil)
+			vmctx := &tracing.VMContext{
+				StateDB:     state,
+				Coinbase:    blockCtx.Coinbase,
+				BlockNumber: new(big.Int).Set(header.Number),
+				Time:        blockCtx.Time,
+				BlockHash:   header.Hash(),
+				TxHash:      expectedTx.Hash(),
+				TxIndex:     state.TxIndex(),
+				BaseFee:     blockCtx.BaseFee,
+				BlobBaseFee: blockCtx.BlobBaseFee,
+				GasLimit:    blockCtx.GasLimit,
+				ChainID:     p.chainConfig.ChainID,
+				Random:      blockCtx.Random,
+				Difficulty:  blockCtx.Difficulty,
+			}
+			hooks.OnTxStart(vmctx, expectedTx, msg.From())
+		}
+		if hooks.OnTxEnd != nil {
+			defer func() {
+				hooks.OnTxEnd(receipt, err)
+			}()
+		}
+	}
+
 	gasUsed, err := applyMessage(msg, state, header, p.chainConfig, chainCtx, vmCfg)
 	if err != nil {
 		return err
@@ -2354,7 +2391,7 @@ func (p *Parlia) applyTransaction(
 		root = state.IntermediateRoot(p.chainConfig.IsEIP158(header.Number)).Bytes()
 	}
 	*usedGas += gasUsed
-	receipt := types.NewReceipt(root, false, *usedGas)
+	receipt = types.NewReceipt(root, false, *usedGas)
 	receipt.TxHash = expectedTx.Hash()
 	receipt.GasUsed = gasUsed
 

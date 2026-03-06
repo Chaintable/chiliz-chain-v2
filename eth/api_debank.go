@@ -188,9 +188,13 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	usedGasBeforeFinalize := *usedGas
 	var traceStateCopy *state.StateDB
 	var traceSystemTxs []*types.Transaction
+	var commonTxsForReplay []*types.Transaction
 	if isPoSA && len(systemTxs) > 0 {
 		traceStateCopy = statedb.Copy()
 		traceSystemTxs = append(traceSystemTxs, systemTxs...)
+		// Save commonTxs before Finalize, because Finalize appends system txs to commonTxs via the pointer.
+		commonTxsForReplay = make([]*types.Transaction, len(commonTxs))
+		copy(commonTxsForReplay, commonTxs)
 	}
 
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards, system txs).
@@ -203,7 +207,8 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	// detailed opcode/call traces for systemTx execution.
 	if traceStateCopy != nil {
 		// System tx is replayed by Parlia consensus path for consistency.
-		if err := systemReplayer.ReplaySystemTransactions(api.eth.blockchain, block.Header(), traceStateCopy, commonTxs, traceSystemTxs, usedGasBeforeFinalize, hooks); err != nil {
+		// Use commonTxsForReplay (without system txs appended by Finalize) to avoid wrong tx indices.
+		if err := systemReplayer.ReplaySystemTransactions(api.eth.blockchain, block.Header(), traceStateCopy, commonTxsForReplay, traceSystemTxs, usedGasBeforeFinalize, hooks); err != nil {
 			return nil, err
 		}
 	}
