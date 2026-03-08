@@ -1932,13 +1932,6 @@ func (s *StateDB) StateDiff(deleteEmptyObjects bool) (root common.Hash, destruct
 	accounts = make(map[common.Hash][]byte)
 	storages = make(map[common.Hash]map[common.Hash][]byte)
 	codes = make(map[common.Hash][]byte)
-	encode := func(val common.Hash) []byte {
-		if val == (common.Hash{}) {
-			return nil
-		}
-		blob, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val[:]))
-		return blob
-	}
 
 	for addr, prev := range s.stateObjectsDestruct {
 		if prev == nil {
@@ -1960,15 +1953,22 @@ func (s *StateDB) StateDiff(deleteEmptyObjects bool) (root common.Hash, destruct
 		if obj.dirtyCode {
 			codes[common.Hash(obj.CodeHash())] = common.CopyBytes(obj.code)
 		}
-		for key, val := range obj.pendingStorage {
-			if val == obj.originStorage[key] {
-				continue
-			}
-			slotHash := crypto.Keccak256Hash(key[:])
-			if _, ok := storages[addrHash]; !ok {
-				storages[addrHash] = make(map[common.Hash][]byte)
-			}
-			storages[addrHash][slotHash] = encode(val)
+	}
+	// Use s.storages instead of obj.pendingStorage for storage diffs.
+	// IntermediateRoot() (called above) triggers updateTrie() which moves
+	// pendingStorage entries into s.storages and then clears pendingStorage.
+	// Reading obj.pendingStorage after that point would yield empty results.
+	// s.storages is keyed by addrHash -> slotHash -> rlp-encoded value,
+	// which is exactly the format we need.
+	for addrHash, slots := range s.storages {
+		if len(slots) == 0 {
+			continue
+		}
+		if _, ok := storages[addrHash]; !ok {
+			storages[addrHash] = make(map[common.Hash][]byte, len(slots))
+		}
+		for slotHash, value := range slots {
+			storages[addrHash][slotHash] = value
 		}
 	}
 	return
