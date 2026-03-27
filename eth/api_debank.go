@@ -48,6 +48,9 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	if err != nil {
 		return nil, err
 	}
+	if block == nil {
+		return nil, fmt.Errorf("block not found")
+	}
 	if block.NumberU64() == 0 {
 		genesis, err := core.ReadGenesis(api.eth.chainDb)
 		if err != nil {
@@ -92,6 +95,9 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	parent, err := api.eth.APIBackend.BlockByHash(ctx, block.ParentHash())
 	if err != nil {
 		return nil, err
+	}
+	if parent == nil {
+		return nil, fmt.Errorf("parent block %s not found", block.ParentHash().Hex())
 	}
 	statedb, release, err := api.eth.APIBackend.StateAtBlock(ctx, parent, 128, nil, true, false)
 	if err != nil {
