@@ -261,7 +261,10 @@ func ProcessBeaconBlockRoot(beaconRoot common.Hash, vmenv *vm.EVM, statedb *stat
 // this method takes an already created EVM instance as input.
 func ApplyTransactionWithEVM(msg *Message, config *params.ChainConfig, gp *GasPool, statedb *state.StateDB, blockNumber *big.Int, blockHash common.Hash, blockTime uint64, tx *types.Transaction, usedGas *uint64, evm *vm.EVM, receiptProcessors ...ReceiptProcessor) (receipt *types.Receipt, err error) {
 	// Hook-based tracers need explicit tx boundaries with the transaction object.
-	var hooks *tracing.Hooks
+	var (
+		hooks     *tracing.Hooks
+		txHookErr error
+	)
 	if evm != nil {
 		if h, ok := evm.Config.Tracer.(*tracing.Hooks); ok {
 			hooks = h
@@ -288,7 +291,7 @@ func ApplyTransactionWithEVM(msg *Message, config *params.ChainConfig, gp *GasPo
 		}
 		if hooks.OnTxEnd != nil {
 			defer func() {
-				hooks.OnTxEnd(receipt, err)
+				hooks.OnTxEnd(receipt, txHookErr)
 			}()
 		}
 	}
@@ -296,6 +299,7 @@ func ApplyTransactionWithEVM(msg *Message, config *params.ChainConfig, gp *GasPo
 	// Apply the transaction to the current state (included in the env).
 	result, err := ApplyMessage(evm, msg, gp)
 	if err != nil {
+		txHookErr = err
 		return nil, err
 	}
 
@@ -337,5 +341,20 @@ func ApplyTransactionWithEVM(msg *Message, config *params.ChainConfig, gp *GasPo
 	for _, receiptProcessor := range receiptProcessors {
 		receiptProcessor.Apply(receipt)
 	}
+	txHookErr = txEndHookErr(hooks, result, err)
 	return receipt, err
+}
+
+func txEndHookErr(hooks *tracing.Hooks, result *ExecutionResult, err error) error {
+	if err != nil || hooks == nil || result == nil || result.Err == nil {
+		return err
+	}
+	// Some hook-based tracers assume the top-level frame exists by OnTxEnd.
+	// If execution failed before CaptureStart ran, surface the VM error so the
+	// tracer can treat it like a pre-execution failure instead of indexing an
+	// empty call stack.
+	if !hooks.TxHasTopCall() {
+		return result.Err
+	}
+	return err
 }
