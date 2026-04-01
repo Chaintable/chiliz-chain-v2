@@ -80,9 +80,15 @@ type Hooks struct {
 
 	logIndex      uint
 	logFrameStack []uint
+	txHasTopCall  bool
 }
 
-func (h *Hooks) CaptureTxStart(gasLimit uint64)         {}
+func (h *Hooks) CaptureTxStart(gasLimit uint64) {
+	if h == nil {
+		return
+	}
+	h.txHasTopCall = false
+}
 func (h *Hooks) CaptureTxEnd(restGas uint64)            {}
 func (h *Hooks) CaptureSystemTxEnd(intrinsicGas uint64) {}
 
@@ -90,6 +96,7 @@ func (h *Hooks) CaptureStart(env *vm.EVM, from, to common.Address, create bool, 
 	if h == nil {
 		return
 	}
+	h.txHasTopCall = true
 	h.logIndex = 0
 	h.logFrameStack = h.logFrameStack[:0]
 	h.pushLogFrame()
@@ -135,6 +142,15 @@ func (h *Hooks) CaptureExit(output []byte, gasUsed uint64, err error) {
 
 func (h *Hooks) pushLogFrame() {
 	h.logFrameStack = append(h.logFrameStack, h.logIndex)
+}
+
+// TxHasTopCall reports whether the current transaction reached the top-level
+// call/create tracer boundary via CaptureStart.
+func (h *Hooks) TxHasTopCall() bool {
+	if h == nil {
+		return false
+	}
+	return h.txHasTopCall
 }
 
 func (h *Hooks) popLogFrame(reverted bool) {

@@ -30,6 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -261,7 +262,10 @@ func ProcessBeaconBlockRoot(beaconRoot common.Hash, vmenv *vm.EVM, statedb *stat
 // this method takes an already created EVM instance as input.
 func ApplyTransactionWithEVM(msg *Message, config *params.ChainConfig, gp *GasPool, statedb *state.StateDB, blockNumber *big.Int, blockHash common.Hash, blockTime uint64, tx *types.Transaction, usedGas *uint64, evm *vm.EVM, receiptProcessors ...ReceiptProcessor) (receipt *types.Receipt, err error) {
 	// Hook-based tracers need explicit tx boundaries with the transaction object.
-	var hooks *tracing.Hooks
+	var (
+		hooks     *tracing.Hooks
+		txHookErr error
+	)
 	if evm != nil {
 		if h, ok := evm.Config.Tracer.(*tracing.Hooks); ok {
 			hooks = h
@@ -288,7 +292,7 @@ func ApplyTransactionWithEVM(msg *Message, config *params.ChainConfig, gp *GasPo
 		}
 		if hooks.OnTxEnd != nil {
 			defer func() {
-				hooks.OnTxEnd(receipt, err)
+				hooks.OnTxEnd(receipt, txHookErr)
 			}()
 		}
 	}
@@ -296,6 +300,7 @@ func ApplyTransactionWithEVM(msg *Message, config *params.ChainConfig, gp *GasPo
 	// Apply the transaction to the current state (included in the env).
 	result, err := ApplyMessage(evm, msg, gp)
 	if err != nil {
+		txHookErr = err
 		return nil, err
 	}
 
@@ -337,5 +342,40 @@ func ApplyTransactionWithEVM(msg *Message, config *params.ChainConfig, gp *GasPo
 	for _, receiptProcessor := range receiptProcessors {
 		receiptProcessor.Apply(receipt)
 	}
+	txHookErr = txEndHookErr(hooks, result, err, tx, receipt, blockNumber, blockHash)
 	return receipt, err
+}
+
+func txEndHookErr(hooks *tracing.Hooks, result *ExecutionResult, err error, tx *types.Transaction, receipt *types.Receipt, blockNumber *big.Int, blockHash common.Hash) error {
+	if err != nil || hooks == nil || result == nil || result.Err == nil {
+		return err
+	}
+	// Some hook-based tracers assume the top-level frame exists by OnTxEnd.
+	// If execution failed before CaptureStart ran, surface the VM error so the
+	// tracer can treat it like a pre-execution failure instead of indexing an
+	// empty call stack.
+	if !hooks.TxHasTopCall() {
+		fields := []interface{}{
+			"err", result.Err,
+			"noTopCall", true,
+		}
+		if tx != nil {
+			fields = append(fields, "txHash", tx.Hash(), "txType", tx.Type())
+			if to := tx.To(); to != nil {
+				fields = append(fields, "to", *to)
+			}
+		}
+		if receipt != nil {
+			fields = append(fields, "receiptStatus", receipt.Status, "gasUsed", receipt.GasUsed)
+		}
+		if blockNumber != nil {
+			fields = append(fields, "blockNumber", blockNumber.Uint64())
+		}
+		if blockHash != (common.Hash{}) {
+			fields = append(fields, "blockHash", blockHash)
+		}
+		log.Warn("Skipping hook tracer tx end for transaction without top-level call frame", fields...)
+		return result.Err
+	}
+	return err
 }
