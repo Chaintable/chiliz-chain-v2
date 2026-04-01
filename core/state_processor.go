@@ -30,6 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -341,11 +342,11 @@ func ApplyTransactionWithEVM(msg *Message, config *params.ChainConfig, gp *GasPo
 	for _, receiptProcessor := range receiptProcessors {
 		receiptProcessor.Apply(receipt)
 	}
-	txHookErr = txEndHookErr(hooks, result, err)
+	txHookErr = txEndHookErr(hooks, result, err, tx, receipt, blockNumber, blockHash)
 	return receipt, err
 }
 
-func txEndHookErr(hooks *tracing.Hooks, result *ExecutionResult, err error) error {
+func txEndHookErr(hooks *tracing.Hooks, result *ExecutionResult, err error, tx *types.Transaction, receipt *types.Receipt, blockNumber *big.Int, blockHash common.Hash) error {
 	if err != nil || hooks == nil || result == nil || result.Err == nil {
 		return err
 	}
@@ -354,6 +355,26 @@ func txEndHookErr(hooks *tracing.Hooks, result *ExecutionResult, err error) erro
 	// tracer can treat it like a pre-execution failure instead of indexing an
 	// empty call stack.
 	if !hooks.TxHasTopCall() {
+		fields := []interface{}{
+			"err", result.Err,
+			"noTopCall", true,
+		}
+		if tx != nil {
+			fields = append(fields, "txHash", tx.Hash(), "txType", tx.Type())
+			if to := tx.To(); to != nil {
+				fields = append(fields, "to", *to)
+			}
+		}
+		if receipt != nil {
+			fields = append(fields, "receiptStatus", receipt.Status, "gasUsed", receipt.GasUsed)
+		}
+		if blockNumber != nil {
+			fields = append(fields, "blockNumber", blockNumber.Uint64())
+		}
+		if blockHash != (common.Hash{}) {
+			fields = append(fields, "blockHash", blockHash)
+		}
+		log.Warn("Skipping hook tracer tx end for transaction without top-level call frame", fields...)
 		return result.Err
 	}
 	return err

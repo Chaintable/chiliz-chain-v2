@@ -17,7 +17,7 @@ func TestTxEndHookErr(t *testing.T) {
 		hooks := &tracing.Hooks{}
 		hooks.CaptureTxStart(1)
 
-		got := txEndHookErr(hooks, &ExecutionResult{Err: vmErr}, outerErr)
+		got := txEndHookErr(hooks, &ExecutionResult{Err: vmErr}, outerErr, nil, nil, nil, common.Hash{})
 		if !errors.Is(got, outerErr) {
 			t.Fatalf("expected outer error, got %v", got)
 		}
@@ -27,7 +27,7 @@ func TestTxEndHookErr(t *testing.T) {
 		hooks := &tracing.Hooks{}
 		hooks.CaptureTxStart(1)
 
-		got := txEndHookErr(hooks, &ExecutionResult{Err: vmErr}, nil)
+		got := txEndHookErr(hooks, &ExecutionResult{Err: vmErr}, nil, nil, nil, nil, common.Hash{})
 		if !errors.Is(got, vmErr) {
 			t.Fatalf("expected vm error, got %v", got)
 		}
@@ -38,7 +38,7 @@ func TestTxEndHookErr(t *testing.T) {
 		hooks.CaptureTxStart(1)
 		hooks.CaptureStart(nil, common.Address{}, common.Address{}, false, nil, 21000, big.NewInt(0))
 
-		got := txEndHookErr(hooks, &ExecutionResult{Err: vmErr}, nil)
+		got := txEndHookErr(hooks, &ExecutionResult{Err: vmErr}, nil, nil, nil, nil, common.Hash{})
 		if got != nil {
 			t.Fatalf("expected nil error, got %v", got)
 		}
