@@ -458,6 +458,11 @@ func (s *StateDB) TxIndex() int {
 	return s.txIndex
 }
 
+// LogSize returns the number of logs currently recorded in this block state.
+func (s *StateDB) LogSize() uint {
+	return s.logSize
+}
+
 func (s *StateDB) GetCode(addr common.Address) []byte {
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
