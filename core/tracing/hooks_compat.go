@@ -83,11 +83,16 @@ type Hooks struct {
 	txHasTopCall  bool
 }
 
+type logSizeStateDB interface {
+	LogSize() uint
+}
+
 func (h *Hooks) CaptureTxStart(gasLimit uint64) {
 	if h == nil {
 		return
 	}
 	h.txHasTopCall = false
+	h.logIndex = 0
 }
 func (h *Hooks) CaptureTxEnd(restGas uint64)            {}
 func (h *Hooks) CaptureSystemTxEnd(intrinsicGas uint64) {}
@@ -97,7 +102,11 @@ func (h *Hooks) CaptureStart(env *vm.EVM, from, to common.Address, create bool, 
 		return
 	}
 	h.txHasTopCall = true
-	h.logIndex = 0
+	if env != nil {
+		if stateDB, ok := env.StateDB.(logSizeStateDB); ok {
+			h.logIndex = stateDB.LogSize()
+		}
+	}
 	h.logFrameStack = h.logFrameStack[:0]
 	h.pushLogFrame()
 	if h.OnEnter != nil {
