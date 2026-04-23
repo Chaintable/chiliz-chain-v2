@@ -30,7 +30,6 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/metrics/exp"
-	"github.com/fjl/memsize/memsizeui"
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
 	"github.com/urfave/cli/v2"
@@ -38,7 +37,16 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-var Memsize memsizeui.Handler
+// Memsize is a stub handler kept for backward compatibility.
+// The upstream memsize implementation relied on internal runtime symbols and
+// breaks on newer Go toolchains.
+type memsizeHandler struct{}
+
+func (h *memsizeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	http.NotFound(w, r)
+}
+
+var Memsize memsizeHandler
 
 var (
 	verbosityFlag = &cli.IntFlag{

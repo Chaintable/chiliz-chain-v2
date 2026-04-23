@@ -458,6 +458,11 @@ func (s *StateDB) TxIndex() int {
 	return s.txIndex
 }
 
+// LogSize returns the number of logs currently recorded in this block state.
+func (s *StateDB) LogSize() uint {
+	return s.logSize
+}
+
 func (s *StateDB) GetCode(addr common.Address) []byte {
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
@@ -1924,4 +1929,52 @@ func copy2DSet[k comparable](set map[k]map[common.Hash][]byte) map[k]map[common.
 		}
 	}
 	return copied
+}
+
+func (s *StateDB) StateDiff(deleteEmptyObjects bool) (root common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storages map[common.Hash]map[common.Hash][]byte, codes map[common.Hash][]byte, err error) {
+	root = s.IntermediateRoot(deleteEmptyObjects)
+	destructs = make(map[common.Hash]struct{})
+	accounts = make(map[common.Hash][]byte)
+	storages = make(map[common.Hash]map[common.Hash][]byte)
+	codes = make(map[common.Hash][]byte)
+
+	for addr, prev := range s.stateObjectsDestruct {
+		if prev == nil {
+			continue
+		}
+		addrHash := crypto.Keccak256Hash(addr[:])
+		destructs[addrHash] = struct{}{}
+	}
+	for addr := range s.stateObjectsDirty {
+		obj := s.stateObjects[addr]
+		if obj == nil {
+			panic("missing state object")
+		}
+		if obj.deleted {
+			continue
+		}
+		addrHash := obj.addrHash
+		accounts[addrHash] = types.SlimAccountRLP(obj.data)
+		if obj.dirtyCode {
+			codes[common.Hash(obj.CodeHash())] = common.CopyBytes(obj.code)
+		}
+	}
+	// Use s.storages instead of obj.pendingStorage for storage diffs.
+	// IntermediateRoot() (called above) triggers updateTrie() which moves
+	// pendingStorage entries into s.storages and then clears pendingStorage.
+	// Reading obj.pendingStorage after that point would yield empty results.
+	// s.storages is keyed by addrHash -> slotHash -> rlp-encoded value,
+	// which is exactly the format we need.
+	for addrHash, slots := range s.storages {
+		if len(slots) == 0 {
+			continue
+		}
+		if _, ok := storages[addrHash]; !ok {
+			storages[addrHash] = make(map[common.Hash][]byte, len(slots))
+		}
+		for slotHash, value := range slots {
+			storages[addrHash][slotHash] = value
+		}
+	}
+	return
 }
