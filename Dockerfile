@@ -3,9 +3,9 @@ FROM golang:1.24-alpine as builder
 
 RUN apk add --no-cache make cmake gcc musl-dev linux-headers git bash build-base libc-dev libstdc++
 
-ARG ACCESS_TOKEN
+ARG ACCESS_TOKEN=""
 
-RUN git config --global url."https://x-access-token:${ACCESS_TOKEN}@github.com".insteadOf "https://github.com"
+RUN if [ -n "$ACCESS_TOKEN" ]; then git config --global url."https://x-access-token:${ACCESS_TOKEN}@github.com".insteadOf "https://github.com"; fi
 
 COPY go.mod /go-ethereum/
 COPY go.sum /go-ethereum/
