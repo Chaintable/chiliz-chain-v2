@@ -9,13 +9,9 @@ import (
 	ptypes "github.com/Chaintable/pipeline/types"
 	"github.com/Chaintable/pipeline/util"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core"
-	"github.com/ethereum/go-ethereum/core/systemcontracts"
 	"github.com/ethereum/go-ethereum/core/tracing"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -94,10 +90,6 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 
 	chainConfig := api.eth.APIBackend.ChainConfig()
 
-	// Handle build-in system contract code upgrades before normal txs, mirroring
-	// core.StateProcessor.Process (TryUpdateBuildInSystemContract with atBlockBegin=true).
-	systemcontracts.TryUpdateBuildInSystemContract(chainConfig, block.Number(), parent.Time(), block.Time(), statedb, true)
-
 	rpcTracer := ptracer.RPCTracer{}
 	hooks := &tracing.Hooks{
 		OnTxStart: rpcTracer.OnTxStart,
@@ -107,81 +99,19 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 		OnOpcode:  rpcTracer.OnOpcode,
 		OnLog:     rpcTracer.OnLog,
 	}
-	blockCtx := core.NewEVMBlockContext(block.Header(), ethapi.NewChainContext(ctx, api.eth.APIBackend), nil)
-	evm := vm.NewEVM(blockCtx, statedb, chainConfig, vm.Config{Tracer: hooks})
 
+	statedb.SetExpectedStateRoot(block.Root())
 	rpcTracer.OnBlockStart(block)
 
-	// EIP-4788 beacon-root and EIP-2935 parent-block-hash system calls run before the normal
-	// txs (mirroring core.StateProcessor.Process). ProcessParentBlockHash is NOT Parlia-gated
-	// upstream, so it executes on every post-Prague Chiliz block; omitting it would diverge the
-	// replayed state root from consensus on every Prague block.
-	if beaconRoot := block.BeaconRoot(); beaconRoot != nil {
-		core.ProcessBeaconBlockRoot(*beaconRoot, evm)
-	}
-	if chainConfig.IsPrague(block.Number(), block.Time()) || chainConfig.IsVerkle(block.Number(), block.Time()) {
-		core.ProcessParentBlockHash(block.ParentHash(), evm)
-	}
-
-	var (
-		txs      = block.Transactions()
-		signer   = types.MakeSigner(chainConfig, block.Number(), block.Time())
-		gp       = new(core.GasPool).AddGas(block.GasLimit())
-		usedGas  = new(uint64)
-		receipts = make([]*types.Receipt, 0, len(txs))
-	)
-	posa, isPoSA := api.eth.engine.(consensus.PoSA)
-	commonTxs := make([]*types.Transaction, 0, len(txs))
-	// usually do have two tx, one for validator set contract, another for system reward contract.
-	systemTxs := make([]*types.Transaction, 0, 2)
-
-	for i, tx := range txs {
-		if isPoSA {
-			isSystemTx, err := posa.IsSystemTransaction(tx, block.Header())
-			if err != nil {
-				return nil, err
-			}
-			if isSystemTx {
-				systemTxs = append(systemTxs, tx)
-				continue
-			}
-		}
-		if chainConfig.IsCancun(block.Number(), block.Time()) {
-			if len(systemTxs) > 0 {
-				// systemTxs should be always at the end of block.
-				return nil, fmt.Errorf("normal tx %d [%v] after systemTx", i, tx.Hash().Hex())
-			}
-		}
-
-		msg, err := core.TransactionToMessage(tx, signer, blockCtx.BaseFee)
-		if err != nil {
-			return nil, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
-		}
-		statedb.SetTxContext(tx.Hash(), i)
-		evm.SetTxContext(core.NewEVMTxContext(msg))
-
-		receipt, err := core.ApplyTransactionWithEVM(msg, gp, statedb, block.Number(), block.Hash(), block.Time(), tx, usedGas, evm)
-		if err != nil {
-			return nil, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
-		}
-		commonTxs = append(commonTxs, tx)
-		receipts = append(receipts, receipt)
-	}
-
-	// Fail if Shanghai not enabled and len(withdrawals) is non-zero.
-	withdrawals := block.Withdrawals()
-	if len(withdrawals) > 0 && !chainConfig.IsShanghai(block.Number(), block.Time()) {
-		return nil, fmt.Errorf("withdrawals before shanghai")
-	}
-
-	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards,
-	// system txs). Passing the tracer hooks lets the PoSA engine trace the system transactions
-	// natively in the same pass — upstream Finalize threads the tracer through system-tx
-	// execution (OnTxStart/OnTxEnd/OnSystemTx*), so the indexer captures system-tx EVM traces
-	// without a separate replay on a copied state. Tracing hooks are read-only observers and do
-	// not affect the resulting state/root.
-	if err := api.eth.engine.Finalize(api.eth.blockchain, block.Header(), statedb, &commonTxs, block.Uncles(), withdrawals, &receipts, &systemTxs, usedGas, hooks); err != nil {
-		return nil, err
+	// Drive the replay through the canonical block processor with the tracer attached,
+	// matching the production BSC debank fork (Chaintable/bsc-x). Process runs the exact
+	// consensus code path — build-in system-contract upgrades, the EIP-4788 beacon-root and
+	// EIP-2935 parent-block-hash system calls, the tx loop, and the PoSA Finalize with native
+	// system-tx tracing — so the replayed state root always matches consensus and every
+	// current/future hardfork system call is handled automatically, with no hand-rolled tx
+	// loop to keep in sync with upstream.
+	if _, err = api.eth.BlockChain().Processor().Process(block, statedb, vm.Config{Tracer: hooks}); err != nil {
+		return nil, fmt.Errorf("could not process block: %w", err)
 	}
 
 	root, destructs, accounts, storages, codes, err := statedb.StateDiff(chainConfig.IsEIP158(block.Number()))

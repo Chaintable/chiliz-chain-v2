@@ -1756,9 +1756,11 @@ func (s *StateDB) StateDiff(deleteEmptyObjects bool) (root common.Hash, destruct
 	codes = make(map[common.Hash][]byte)
 
 	// Destructed accounts (self-destruct / recreate within the block). stateObjectsDestruct
-	// is keyed by address with the pre-destruct object as value (nil guard kept for safety).
-	for addr, prev := range s.stateObjectsDestruct {
-		if prev == nil {
+	// is keyed by address with the pre-destruct object as value; skip objects whose origin is
+	// nil — i.e. accounts created and destroyed within the same block that never existed
+	// on-chain before, which must not be reported as a destruct (matches Chaintable/bsc-x).
+	for addr, prevObj := range s.stateObjectsDestruct {
+		if prevObj.origin == nil {
 			continue
 		}
 		destructs[crypto.Keccak256Hash(addr[:])] = struct{}{}
