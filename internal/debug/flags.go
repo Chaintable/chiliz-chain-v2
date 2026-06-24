@@ -19,6 +19,7 @@ package debug
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -33,20 +34,8 @@ import (
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
 	"github.com/urfave/cli/v2"
-	"golang.org/x/exp/slog"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
-
-// Memsize is a stub handler kept for backward compatibility.
-// The upstream memsize implementation relied on internal runtime symbols and
-// breaks on newer Go toolchains.
-type memsizeHandler struct{}
-
-func (h *memsizeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	http.NotFound(w, r)
-}
-
-var Memsize memsizeHandler
 
 var (
 	verbosityFlag = &cli.IntFlag{
@@ -147,8 +136,8 @@ var (
 		Category: flags.LoggingCategory,
 	}
 	traceFlag = &cli.StringFlag{
-		Name:     "trace",
-		Usage:    "Write execution trace to the given file",
+		Name:     "go-execution-trace",
+		Usage:    "Write Go execution trace to the given file",
 		Category: flags.LoggingCategory,
 	}
 )
@@ -321,7 +310,6 @@ func StartPProf(address string, withMetrics bool) {
 	if withMetrics {
 		exp.Exp(metrics.DefaultRegistry)
 	}
-	http.Handle("/memsize/", http.StripPrefix("/memsize", &Memsize))
 	log.Info("Starting pprof server", "addr", fmt.Sprintf("http://%s/debug/pprof", address))
 	go func() {
 		if err := http.ListenAndServe(address, nil); err != nil {
