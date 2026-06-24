@@ -11,7 +11,6 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core"
-	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/systemcontracts"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -23,18 +22,6 @@ import (
 
 type DebankAPI struct {
 	eth *Ethereum
-}
-
-type posaSystemTxReplayer interface {
-	ReplaySystemTransactions(
-		chain consensus.ChainHeaderReader,
-		header *types.Header,
-		state *state.StateDB,
-		commonTxs []*types.Transaction,
-		systemTxs []*types.Transaction,
-		usedGasStart uint64,
-		hooks *tracing.Hooks,
-	) error
 }
 
 func NewDebankAPI(eth *Ethereum) *DebankAPI {
@@ -107,10 +94,9 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 
 	chainConfig := api.eth.APIBackend.ChainConfig()
 
-	// upgrade build-in system contract before normal txs if Feynman is not enabled
-	if !chainConfig.IsFeynman(block.Number(), block.Time()) {
-		systemcontracts.UpgradeBuildInSystemContract(chainConfig, block.Number(), parent.Time(), block.Time(), statedb)
-	}
+	// Handle build-in system contract code upgrades before normal txs, mirroring
+	// core.StateProcessor.Process (TryUpdateBuildInSystemContract with atBlockBegin=true).
+	systemcontracts.TryUpdateBuildInSystemContract(chainConfig, block.Number(), parent.Time(), block.Time(), statedb, true)
 
 	rpcTracer := ptracer.RPCTracer{}
 	hooks := &tracing.Hooks{
@@ -122,12 +108,19 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 		OnLog:     rpcTracer.OnLog,
 	}
 	blockCtx := core.NewEVMBlockContext(block.Header(), ethapi.NewChainContext(ctx, api.eth.APIBackend), nil)
-	evm := vm.NewEVM(blockCtx, vm.TxContext{}, statedb, chainConfig, vm.Config{Tracer: hooks})
+	evm := vm.NewEVM(blockCtx, statedb, chainConfig, vm.Config{Tracer: hooks})
 
 	rpcTracer.OnBlockStart(block)
 
+	// EIP-4788 beacon-root and EIP-2935 parent-block-hash system calls run before the normal
+	// txs (mirroring core.StateProcessor.Process). ProcessParentBlockHash is NOT Parlia-gated
+	// upstream, so it executes on every post-Prague Chiliz block; omitting it would diverge the
+	// replayed state root from consensus on every Prague block.
 	if beaconRoot := block.BeaconRoot(); beaconRoot != nil {
-		core.ProcessBeaconBlockRoot(*beaconRoot, evm, statedb)
+		core.ProcessBeaconBlockRoot(*beaconRoot, evm)
+	}
+	if chainConfig.IsPrague(block.Number(), block.Time()) || chainConfig.IsVerkle(block.Number(), block.Time()) {
+		core.ProcessParentBlockHash(block.ParentHash(), evm)
 	}
 
 	var (
@@ -138,14 +131,6 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 		receipts = make([]*types.Receipt, 0, len(txs))
 	)
 	posa, isPoSA := api.eth.engine.(consensus.PoSA)
-	var systemReplayer posaSystemTxReplayer
-	if isPoSA {
-		var ok bool
-		systemReplayer, ok = api.eth.engine.(posaSystemTxReplayer)
-		if !ok {
-			return nil, fmt.Errorf("PoSA engine %T does not support ReplaySystemTransactions", api.eth.engine)
-		}
-	}
 	commonTxs := make([]*types.Transaction, 0, len(txs))
 	// usually do have two tx, one for validator set contract, another for system reward contract.
 	systemTxs := make([]*types.Transaction, 0, 2)
@@ -173,9 +158,9 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 			return nil, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 		}
 		statedb.SetTxContext(tx.Hash(), i)
-		evm.Reset(core.NewEVMTxContext(msg), statedb)
+		evm.SetTxContext(core.NewEVMTxContext(msg))
 
-		receipt, err := core.ApplyTransactionWithEVM(msg, chainConfig, gp, statedb, block.Number(), block.Hash(), block.Time(), tx, usedGas, evm)
+		receipt, err := core.ApplyTransactionWithEVM(msg, gp, statedb, block.Number(), block.Hash(), block.Time(), tx, usedGas, evm)
 		if err != nil {
 			return nil, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 		}
@@ -189,34 +174,14 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 		return nil, fmt.Errorf("withdrawals before shanghai")
 	}
 
-	// Copy state for synthetic system-tx tracing (does not affect final state/diff).
-	// We need this because PoSA finalization executes system messages without a tracer.
-	usedGasBeforeFinalize := *usedGas
-	var traceStateCopy *state.StateDB
-	var traceSystemTxs []*types.Transaction
-	var commonTxsForReplay []*types.Transaction
-	if isPoSA && len(systemTxs) > 0 {
-		traceStateCopy = statedb.Copy()
-		traceSystemTxs = append(traceSystemTxs, systemTxs...)
-		// Save commonTxs before Finalize, because Finalize appends system txs to commonTxs via the pointer.
-		commonTxsForReplay = make([]*types.Transaction, len(commonTxs))
-		copy(commonTxsForReplay, commonTxs)
-	}
-
-	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards, system txs).
-	if err := api.eth.engine.Finalize(api.eth.blockchain, block.Header(), statedb, &commonTxs, block.Uncles(), withdrawals, &receipts, &systemTxs, usedGas); err != nil {
+	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards,
+	// system txs). Passing the tracer hooks lets the PoSA engine trace the system transactions
+	// natively in the same pass — upstream Finalize threads the tracer through system-tx
+	// execution (OnTxStart/OnTxEnd/OnSystemTx*), so the indexer captures system-tx EVM traces
+	// without a separate replay on a copied state. Tracing hooks are read-only observers and do
+	// not affect the resulting state/root.
+	if err := api.eth.engine.Finalize(api.eth.blockchain, block.Header(), statedb, &commonTxs, block.Uncles(), withdrawals, &receipts, &systemTxs, usedGas, hooks); err != nil {
 		return nil, err
-	}
-
-	// Replay system transactions on the copied state to generate synthetic EVM traces.
-	// This keeps state/root aligned to consensus (Finalize result), while still producing
-	// detailed opcode/call traces for systemTx execution.
-	if traceStateCopy != nil {
-		// System tx is replayed by Parlia consensus path for consistency.
-		// Use commonTxsForReplay (without system txs appended by Finalize) to avoid wrong tx indices.
-		if err := systemReplayer.ReplaySystemTransactions(api.eth.blockchain, block.Header(), traceStateCopy, commonTxsForReplay, traceSystemTxs, usedGasBeforeFinalize, hooks); err != nil {
-			return nil, err
-		}
 	}
 
 	root, destructs, accounts, storages, codes, err := statedb.StateDiff(chainConfig.IsEIP158(block.Number()))
