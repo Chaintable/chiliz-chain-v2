@@ -1683,6 +1683,57 @@ func TestTrieForkGC(t *testing.T) {
 	}
 }
 
+// Tests that hash-based trie garbage collection honors the configured retention
+// window instead of always using the default of 128 layers.
+func TestTrieRetentionConfig(t *testing.T) {
+	for _, retention := range []uint64{state.TriesInMemory, 300} {
+		t.Run(fmt.Sprintf("retention_%d", retention), func(t *testing.T) {
+			engine := ethash.NewFaker()
+			genesis := &Genesis{
+				Config:  params.TestChainConfig,
+				BaseFee: big.NewInt(params.InitialBaseFee),
+			}
+			_, blocks, _ := GenerateChainWithGenesis(genesis, engine, 2*int(retention), func(i int, b *BlockGen) {
+				b.SetCoinbase(common.Address{1})
+			})
+
+			config := DefaultConfig()
+			config.TriesInMemory = retention
+			config.SnapshotLimit = 0
+			chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), genesis, engine, config)
+			if err != nil {
+				t.Fatalf("failed to create tester chain: %v", err)
+			}
+			defer chain.Stop()
+
+			if n, err := chain.InsertChain(blocks); err != nil {
+				t.Fatalf("block %d: failed to insert into chain: %v", n, err)
+			}
+			firstRetained := blocks[len(blocks)-int(retention)]
+			if !chain.HasState(firstRetained.Root()) {
+				t.Fatalf("oldest retained state at block %d is missing", firstRetained.NumberU64())
+			}
+			lastPruned := blocks[len(blocks)-int(retention)-1]
+			if chain.HasState(lastPruned.Root()) {
+				t.Fatalf("state before retention window at block %d is still available", lastPruned.NumberU64())
+			}
+		})
+	}
+}
+
+func TestTrieRetentionDefaultsZero(t *testing.T) {
+	config := DefaultConfig()
+	config.TriesInMemory = 0
+	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), DefaultGenesisBlock(), ethash.NewFaker(), config)
+	if err != nil {
+		t.Fatalf("failed to create tester chain: %v", err)
+	}
+	defer chain.Stop()
+	if chain.TriesInMemory() != state.TriesInMemory {
+		t.Fatalf("zero trie retention did not use default: have %d, want %d", chain.TriesInMemory(), state.TriesInMemory)
+	}
+}
+
 // Tests that doing large reorgs works even if the state associated with the
 // forking point is not available any more.
 func TestLargeReorgTrieGC(t *testing.T) {
