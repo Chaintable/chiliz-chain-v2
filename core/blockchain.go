@@ -1546,19 +1546,18 @@ func (bc *BlockChain) Stop() {
 							})
 						}
 					}
-
-					if snapBase != (common.Hash{}) {
-						log.Info("Writing snapshot state to disk", "root", snapBase)
-						if err := triedb.Commit(snapBase, true); err != nil {
-							log.Error("Failed to commit recent state trie", "err", err)
-						}
+				}
+				if snapBase != (common.Hash{}) {
+					log.Info("Writing snapshot state to disk", "root", snapBase)
+					if err := triedb.Commit(snapBase, true); err != nil {
+						log.Error("Failed to commit recent state trie", "err", err)
 					}
-					for !bc.triegc.Empty() {
-						triedb.Dereference(bc.triegc.PopItem())
-					}
-					if _, size, _, _ := triedb.Size(); size != 0 {
-						log.Error("Dangling trie nodes after full cleanup")
-					}
+				}
+				for !bc.triegc.Empty() {
+					triedb.Dereference(bc.triegc.PopItem())
+				}
+				if _, size, _, _ := triedb.Size(); size != 0 {
+					log.Error("Dangling trie nodes after full cleanup")
 				}
 			}
 		}

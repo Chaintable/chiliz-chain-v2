@@ -82,7 +82,7 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	if parent == nil {
 		return nil, fmt.Errorf("parent block %s not found", block.ParentHash().Hex())
 	}
-	statedb, release, err := api.eth.APIBackend.StateAtBlock(ctx, parent, 128, nil, true, false)
+	statedb, release, err := api.eth.APIBackend.StateAtBlock(ctx, parent, api.eth.BlockChain().TriesInMemory(), nil, true, false)
 	if err != nil {
 		return nil, err
 	}

@@ -1734,6 +1734,43 @@ func TestTrieRetentionDefaultsZero(t *testing.T) {
 	}
 }
 
+// Tests that a graceful restart persists the configured oldest retained state,
+// which is the reexecution base for recovering intermediate historical states.
+func TestTrieRetentionRestartBoundary(t *testing.T) {
+	const retention = uint64(300)
+	engine := ethash.NewFaker()
+	genesis := &Genesis{
+		Config:  params.TestChainConfig,
+		BaseFee: big.NewInt(params.InitialBaseFee),
+	}
+	_, blocks, _ := GenerateChainWithGenesis(genesis, engine, 2*int(retention), func(i int, b *BlockGen) {
+		b.SetCoinbase(common.Address{1})
+	})
+
+	db := rawdb.NewMemoryDatabase()
+	config := DefaultConfig()
+	config.TriesInMemory = retention
+	chain, err := NewBlockChain(db, genesis, engine, config)
+	if err != nil {
+		t.Fatalf("failed to create tester chain: %v", err)
+	}
+	if n, err := chain.InsertChain(blocks); err != nil {
+		t.Fatalf("block %d: failed to insert into chain: %v", n, err)
+	}
+	chain.Stop()
+
+	chain, err = NewBlockChain(db, genesis, engine, config)
+	if err != nil {
+		t.Fatalf("failed to restart tester chain: %v", err)
+	}
+	defer chain.Stop()
+	for _, index := range []int{len(blocks) - int(retention), len(blocks) - 1} {
+		if !chain.HasState(blocks[index].Root()) {
+			t.Fatalf("persisted state at block %d is missing after restart", blocks[index].NumberU64())
+		}
+	}
+}
+
 // Tests that doing large reorgs works even if the state associated with the
 // forking point is not available any more.
 func TestLargeReorgTrieGC(t *testing.T) {
