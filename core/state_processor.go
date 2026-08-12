@@ -84,9 +84,11 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		gp          = new(GasPool).AddGas(block.GasLimit())
 	)
 	var parentState *state.StateDB
-	if p.config.IsDragon8(block.Time()) || p.config.IsDragon8Fix(block.Time()) {
+	if cfg.HistoricalStateReplay && (p.config.IsDragon8(block.Time()) || p.config.IsDragon8Fix(block.Time())) {
 		// Capture this before block-begin upgrades and transactions. Tokenomics
-		// queries the parent block, not the partially processed current block.
+		// queries the parent block, not the partially processed current block. This
+		// is needed only when the regenerated state is invisible to the chain backend;
+		// normal block import keeps the established RPC-backed consensus path.
 		parentState = statedb.Copy()
 	}
 

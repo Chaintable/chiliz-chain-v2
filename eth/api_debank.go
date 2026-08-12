@@ -110,7 +110,7 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	// system-tx tracing — so the replayed state root always matches consensus and every
 	// current/future hardfork system call is handled automatically, with no hand-rolled tx
 	// loop to keep in sync with upstream.
-	if _, err = api.eth.BlockChain().Processor().Process(block, statedb, vm.Config{Tracer: hooks}); err != nil {
+	if _, err = api.eth.BlockChain().Processor().Process(block, statedb, vm.Config{Tracer: hooks, HistoricalStateReplay: true}); err != nil {
 		return nil, fmt.Errorf("could not process block: %w", err)
 	}
 
