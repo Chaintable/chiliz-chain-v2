@@ -2,18 +2,21 @@ package parlia
 
 import (
 	"context"
+	"errors"
 	"math"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/systemcontracts"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
-func (p *Parlia) getCurrentValidatorsBeforeLuban(blockHash common.Hash, blockNumber *big.Int) ([]common.Address, error) {
+func (p *Parlia) getCurrentValidatorsBeforeLuban(blockHash common.Hash, blockNumber *big.Int, state vm.StateDB, chain core.ChainContext) ([]common.Address, error) {
 	blockNr := rpc.BlockNumberOrHashWithHash(blockHash, false)
 
 	// prepare different method
@@ -34,11 +37,21 @@ func (p *Parlia) getCurrentValidatorsBeforeLuban(blockHash common.Hash, blockNum
 	msgData := (hexutil.Bytes)(data)
 	toAddress := common.HexToAddress(systemcontracts.ValidatorContract)
 	gas := (hexutil.Uint64)(uint64(math.MaxUint64 / 2))
-	result, err := p.ethAPI.Call(ctx, ethapi.TransactionArgs{
+	args := ethapi.TransactionArgs{
 		Gas:  &gas,
 		To:   &toAddress,
 		Data: &msgData,
-	}, &blockNr, nil, nil)
+	}
+	var result hexutil.Bytes
+	if provider, ok := state.(parentStateProvider); ok {
+		parent := chain.GetHeader(blockHash, blockNumber.Uint64())
+		if parent == nil {
+			return nil, errors.New("parent not found")
+		}
+		result, err = p.callOnState(args, provider.ParentState(), parent, chain)
+	} else {
+		result, err = p.ethAPI.Call(ctx, args, &blockNr, nil, nil)
+	}
 	if err != nil {
 		return nil, err
 	}

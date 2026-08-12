@@ -1108,7 +1108,7 @@ func (p *Parlia) prepareValidators(chain consensus.ChainHeaderReader, header *ty
 		return nil
 	}
 
-	newValidators, voteAddressMap, err := p.getCurrentValidators(header.ParentHash, new(big.Int).Sub(header.Number, big.NewInt(1)))
+	newValidators, voteAddressMap, err := p.getCurrentValidators(header.ParentHash, new(big.Int).Sub(header.Number, big.NewInt(1)), nil, chainContext{Chain: chain, parlia: p})
 	if err != nil {
 		return err
 	}
@@ -1346,7 +1346,7 @@ func (p *Parlia) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 	return nil
 }
 
-func (p *Parlia) verifyValidators(chain consensus.ChainHeaderReader, header *types.Header) error {
+func (p *Parlia) verifyValidators(chain consensus.ChainHeaderReader, header *types.Header, state vm.StateDB) error {
 	epochLength, err := p.epochLength(chain, header, nil)
 	if err != nil {
 		return err
@@ -1355,7 +1355,7 @@ func (p *Parlia) verifyValidators(chain consensus.ChainHeaderReader, header *typ
 		return nil
 	}
 
-	newValidators, voteAddressMap, err := p.getCurrentValidators(header.ParentHash, new(big.Int).Sub(header.Number, big.NewInt(1)))
+	newValidators, voteAddressMap, err := p.getCurrentValidators(header.ParentHash, new(big.Int).Sub(header.Number, big.NewInt(1)), state, chainContext{Chain: chain, parlia: p})
 	if err != nil {
 		return err
 	}
@@ -1545,7 +1545,7 @@ func (p *Parlia) Finalize(chain consensus.ChainHeaderReader, header *types.Heade
 
 	// If the block is an epoch end block, verify the validator list
 	// The verification can only be done when the state is ready, it can't be done in VerifyHeader.
-	if err := p.verifyValidators(chain, header); err != nil {
+	if err := p.verifyValidators(chain, header, state); err != nil {
 		return err
 	}
 
@@ -2199,7 +2199,35 @@ func getNewSupplyForBlockDragon8Fix(forkTime uint64, currentTime uint64) (*big.I
 	return inflationData[year][0], inflationData[year][1], inflationData[year][2]
 }
 
-func (p *Parlia) getLastSupplyFromTokenomics(header *types.Header) (*big.Int, error) {
+type parentStateProvider interface {
+	ParentState() *state.StateDB
+}
+
+func (p *Parlia) callOnState(args ethapi.TransactionArgs, callState *state.StateDB, header *types.Header, chain core.ChainContext) (hexutil.Bytes, error) {
+	// eth_call always operates on a disposable state. Keep the captured parent
+	// state immutable when multiple consensus queries run in the same block.
+	callState = callState.Copy()
+	blockContext := core.NewEVMBlockContext(header, chain, nil)
+	gasCap := uint64(math.MaxUint64 / 2)
+	if err := args.CallDefaults(gasCap, blockContext.BaseFee, p.chainConfig.ChainID); err != nil {
+		return nil, err
+	}
+	msg := args.ToMessage(header.BaseFee, true, true)
+	if msg.GasPrice.Sign() == 0 {
+		blockContext.BaseFee = new(big.Int)
+	}
+	evm := vm.NewEVM(blockContext, callState, p.chainConfig, vm.Config{NoBaseFee: true})
+	result, err := core.ApplyMessage(evm, msg, new(core.GasPool).AddGas(gasCap))
+	if stateErr := callState.Error(); stateErr != nil {
+		return nil, stateErr
+	}
+	if err != nil {
+		return nil, err
+	}
+	return result.Return(), result.Err
+}
+
+func (p *Parlia) getLastSupplyFromTokenomics(state vm.StateDB, header *types.Header, chain core.ChainContext) (*big.Int, error) {
 	method := "getTotalSupply"
 	data, err := p.tokenomicsABI.Pack(method)
 	if err != nil {
@@ -2213,9 +2241,18 @@ func (p *Parlia) getLastSupplyFromTokenomics(header *types.Header) (*big.Int, er
 		Gas:  &gas,
 		Data: &msgData,
 	}
-	blockNum := (rpc.BlockNumber)(big.NewInt(0).Sub(header.Number, big.NewInt(1)).Int64())
-	blockNr := rpc.BlockNumberOrHashWithNumber(blockNum)
-	res, err := p.ethAPI.Call(context.Background(), args, &blockNr, nil, nil)
+	var res hexutil.Bytes
+	if provider, ok := state.(parentStateProvider); ok {
+		parent := chain.GetHeader(header.ParentHash, header.Number.Uint64()-1)
+		if parent == nil {
+			return nil, errors.New("parent not found")
+		}
+		res, err = p.callOnState(args, provider.ParentState(), parent, chain)
+	} else {
+		blockNum := (rpc.BlockNumber)(big.NewInt(0).Sub(header.Number, big.NewInt(1)).Int64())
+		blockNr := rpc.BlockNumberOrHashWithNumber(blockNum)
+		res, err = p.ethAPI.Call(context.Background(), args, &blockNr, nil, nil)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2312,12 +2349,12 @@ func (p *Parlia) distributePipe8Mint(state vm.StateDB, header *types.Header, cha
 }
 
 // getCurrentValidators get current validators
-func (p *Parlia) getCurrentValidators(blockHash common.Hash, blockNum *big.Int) ([]common.Address, map[common.Address]*types.BLSPublicKey, error) {
+func (p *Parlia) getCurrentValidators(blockHash common.Hash, blockNum *big.Int, state vm.StateDB, chain core.ChainContext) ([]common.Address, map[common.Address]*types.BLSPublicKey, error) {
 	// block
 	blockNr := rpc.BlockNumberOrHashWithHash(blockHash, false)
 
 	if !p.chainConfig.IsLuban(blockNum) {
-		validators, err := p.getCurrentValidatorsBeforeLuban(blockHash, blockNum)
+		validators, err := p.getCurrentValidatorsBeforeLuban(blockHash, blockNum, state, chain)
 		return validators, nil, err
 	}
 
@@ -2336,11 +2373,21 @@ func (p *Parlia) getCurrentValidators(blockHash common.Hash, blockNum *big.Int) 
 	msgData := (hexutil.Bytes)(data)
 	toAddress := common.HexToAddress(systemcontract.ValidatorContract)
 	gas := (hexutil.Uint64)(uint64(math.MaxUint64 / 2))
-	result, err := p.ethAPI.Call(ctx, ethapi.TransactionArgs{
+	args := ethapi.TransactionArgs{
 		Gas:  &gas,
 		To:   &toAddress,
 		Data: &msgData,
-	}, &blockNr, nil, nil)
+	}
+	var result hexutil.Bytes
+	if provider, ok := state.(parentStateProvider); ok {
+		parent := chain.GetHeader(blockHash, blockNum.Uint64())
+		if parent == nil {
+			return nil, nil, errors.New("parent not found")
+		}
+		result, err = p.callOnState(args, provider.ParentState(), parent, chain)
+	} else {
+		result, err = p.ethAPI.Call(ctx, args, &blockNr, nil, nil)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2418,7 +2465,7 @@ func (p *Parlia) distributeIncoming(val common.Address, state vm.StateDB, header
 			newTotalSupply *big.Int
 		)
 
-		lastSupply, err := p.getLastSupplyFromTokenomics(header)
+		lastSupply, err := p.getLastSupplyFromTokenomics(state, header, chain)
 		if err != nil {
 			return err
 		}

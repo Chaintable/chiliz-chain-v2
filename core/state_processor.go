@@ -46,6 +46,18 @@ type StateProcessor struct {
 	chain  *HeaderChain        // Canonical header chain
 }
 
+// stateDBWithParent carries the exact pre-block state into consensus finalization.
+// Parlia needs it for parent-block system-contract calls while regenerating state
+// in an ephemeral trie database, which is not visible through the chain backend.
+type stateDBWithParent struct {
+	vm.StateDB
+	parent *state.StateDB
+}
+
+func (s *stateDBWithParent) ParentState() *state.StateDB {
+	return s.parent
+}
+
 // NewStateProcessor initialises a new StateProcessor.
 func NewStateProcessor(config *params.ChainConfig, chain *HeaderChain) *StateProcessor {
 	return &StateProcessor{
@@ -71,6 +83,12 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		allLogs     []*types.Log
 		gp          = new(GasPool).AddGas(block.GasLimit())
 	)
+	var parentState *state.StateDB
+	if p.config.IsDragon8(block.Time()) || p.config.IsDragon8Fix(block.Time()) {
+		// Capture this before block-begin upgrades and transactions. Tokenomics
+		// queries the parent block, not the partially processed current block.
+		parentState = statedb.Copy()
+	}
 
 	// Mutate the block and state according to any hard-fork specs
 	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
@@ -174,7 +192,11 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	}
 
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
-	err = p.chain.engine.Finalize(p.chain, header, tracingStateDB, &commonTxs, block.Uncles(), block.Withdrawals(), &receipts, &systemTxs, usedGas, cfg.Tracer)
+	finalizeStateDB := tracingStateDB
+	if parentState != nil {
+		finalizeStateDB = &stateDBWithParent{StateDB: tracingStateDB, parent: parentState}
+	}
+	err = p.chain.engine.Finalize(p.chain, header, finalizeStateDB, &commonTxs, block.Uncles(), block.Withdrawals(), &receipts, &systemTxs, usedGas, cfg.Tracer)
 	if err != nil {
 		return nil, err
 	}
