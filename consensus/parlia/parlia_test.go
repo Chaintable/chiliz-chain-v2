@@ -3,6 +3,7 @@ package parlia
 import (
 	"crypto/ecdsa"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -792,6 +793,59 @@ func TestGetLastSupplyFromReplayParentState(t *testing.T) {
 	}
 	if nonce := stateDB.GetNonce(testAddr); nonce != 0 {
 		t.Fatalf("parent state was mutated by eth_call: nonce %d", nonce)
+	}
+}
+
+func TestReplaySystemContractReadGasLimit(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	trieDB := triedb.NewDatabase(db, nil)
+	defer trieDB.Close()
+
+	// Return GAS so the result exposes the effective execution limit.
+	gasLeftCode := []byte{0x5a, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3}
+	genesis := &core.Genesis{
+		Config: params.ParliaTestChainConfig,
+		Alloc: types.GenesisAlloc{
+			systemcontract.TokenomicsContractAddress: {Code: gasLeftCode},
+		},
+	}
+	genesisBlock := genesis.MustCommit(db, trieDB)
+	chain, err := core.NewBlockChain(db, genesis, &mockParlia{}, nil)
+	if err != nil {
+		t.Fatalf("failed to create blockchain: %v", err)
+	}
+	defer chain.Stop()
+
+	parentState, err := state.New(genesisBlock.Root(), state.NewDatabase(trieDB, nil))
+	if err != nil {
+		t.Fatalf("failed to open parent state: %v", err)
+	}
+	engine := New(params.ParliaTestChainConfig, db, nil, genesisBlock.Hash())
+	header := &types.Header{
+		ParentHash: genesisBlock.Hash(),
+		Number:     big.NewInt(1),
+		Coinbase:   testAddr,
+		Difficulty: big.NewInt(1),
+		GasLimit:   30_000_000,
+		Time:       genesisBlock.Time() + 1,
+	}
+	cx := chainContext{Chain: chain, parlia: engine}
+
+	got, err := engine.getLastSupplyFromTokenomics(&testStateWithParent{StateDB: parentState.Copy(), parent: parentState}, header, cx)
+	if err != nil {
+		t.Fatalf("failed to read gas left: %v", err)
+	}
+	if got.Sign() <= 0 || got.Uint64() > systemContractReadGasLimit {
+		t.Fatalf("system contract read exceeded gas limit: have %v, limit %d", got, systemContractReadGasLimit)
+	}
+
+	// An infinite loop must terminate deterministically with out-of-gas instead
+	// of occupying a replay worker indefinitely.
+	loopState := parentState.Copy()
+	loopState.SetCode(systemcontract.TokenomicsContractAddress, []byte{0x5b, 0x60, 0x00, 0x56})
+	_, err = engine.getLastSupplyFromTokenomics(&testStateWithParent{StateDB: loopState.Copy(), parent: loopState}, header, cx)
+	if !errors.Is(err, vm.ErrOutOfGas) {
+		t.Fatalf("infinite system contract call returned %v, want %v", err, vm.ErrOutOfGas)
 	}
 }
 

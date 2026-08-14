@@ -3,7 +3,6 @@ package parlia
 import (
 	"context"
 	"errors"
-	"math"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -36,7 +35,7 @@ func (p *Parlia) getCurrentValidatorsBeforeLuban(blockHash common.Hash, blockNum
 	// do smart contract call
 	msgData := (hexutil.Bytes)(data)
 	toAddress := common.HexToAddress(systemcontracts.ValidatorContract)
-	gas := (hexutil.Uint64)(uint64(math.MaxUint64 / 2))
+	gas := (hexutil.Uint64)(systemContractReadGasLimit)
 	args := ethapi.TransactionArgs{
 		Gas:  &gas,
 		To:   &toAddress,
