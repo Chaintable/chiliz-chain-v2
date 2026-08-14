@@ -61,14 +61,8 @@ github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c/go.mod h1:ukJfTF
 github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym/WlBOVXweHU+Q+/VP0lqqI8lqeDx9IjBqo=
 github.com/ChainSafe/go-schnorrkel v0.0.0-20200405005733-88cbf1b4c40d h1:nalkkPQcITbvhmL4+C4cKA87NW0tfm3Kl9VXRoPywFg=
 github.com/ChainSafe/go-schnorrkel v0.0.0-20200405005733-88cbf1b4c40d/go.mod h1:URdX5+vg25ts3aCh8H5IFZybJYKWhJHYMTnf+ULtoC4=
-github.com/Chaintable/pipeline v0.0.62 h1:4tzEyukhilk0uzubK2eLeZEahj1Wv/PLeCBhUO1g3aA=
-github.com/Chaintable/pipeline v0.0.62/go.mod h1:l0GT8LwhbRwaxrLze5FjDv3lHgxxqdf9opAVjJtXNh4=
-github.com/Chaintable/pipeline v0.0.63-0.20260812075024-2998bbf59a5f h1:ti8iQeDP1ZGEYEWZuUVmTTYjNNdBEg7bE3LEx0DVjhI=
-github.com/Chaintable/pipeline v0.0.63-0.20260812075024-2998bbf59a5f/go.mod h1:l0GT8LwhbRwaxrLze5FjDv3lHgxxqdf9opAVjJtXNh4=
-github.com/Chaintable/pipeline v0.0.69-0.20260814030324-a711a3142fbb h1:ZKA8bpzn0MP60nzKs7TAqPKRMuhxnKOlbf5wAQfP8To=
-github.com/Chaintable/pipeline v0.0.69-0.20260814030324-a711a3142fbb/go.mod h1:l0GT8LwhbRwaxrLze5FjDv3lHgxxqdf9opAVjJtXNh4=
-github.com/Chaintable/pipeline v0.0.69-0.20260814032238-1e1f9a8d1d11 h1:aAIQsm/ZU0r3AOrAeBSvrqRqFZWjf4ke/dhqgG/wb7k=
-github.com/Chaintable/pipeline v0.0.69-0.20260814032238-1e1f9a8d1d11/go.mod h1:l0GT8LwhbRwaxrLze5FjDv3lHgxxqdf9opAVjJtXNh4=
+github.com/Chaintable/pipeline v0.0.68 h1:0132jojxP9z0yHTfXFupHPpvfq0g5uIPK0Ewo8P0G4M=
+github.com/Chaintable/pipeline v0.0.68/go.mod h1:l0GT8LwhbRwaxrLze5FjDv3lHgxxqdf9opAVjJtXNh4=
 github.com/DataDog/zstd v1.5.5 h1:oWf5W7GtOLgp6bciQYDmhHHjdhYkALu6S/5Ni9ZgSvQ=
 github.com/DataDog/zstd v1.5.5/go.mod h1:g4AWEaM3yOg3HYfnJ3YIawPnVdXJh9QME85blwSAmyw=
 github.com/Knetic/govaluate v3.0.1-0.20171022003610-9aa49832a739+incompatible/go.mod h1:r7JcOSlj0wfOMncg0iLm8Leh48TZaKVeNIfJntJ2wa0=
