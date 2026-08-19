@@ -85,7 +85,7 @@ const (
 	collectAdditionalVotesRewardRatio = 100 // ratio of additional reward for collecting more votes than needed, the denominator is 100
 
 	gasLimitBoundDivisorBeforeLorentz uint64 = 256 // The bound divisor of the gas limit, used in update calculations before lorentz hard fork.
-	// Keep system-contract reads bounded without making their result depend on wall-clock timeouts.
+	// Keep historical replay system-contract reads bounded without making their result depend on wall-clock timeouts.
 	systemContractReadGasLimit uint64 = 50_000_000
 
 	// `finalityRewardInterval` should be smaller than `inMemorySnapshots`, otherwise, it will result in excessive computation.
@@ -2236,7 +2236,7 @@ func (p *Parlia) getLastSupplyFromTokenomics(state vm.StateDB, header *types.Hea
 		return nil, err
 	}
 	msgData := (hexutil.Bytes)(data)
-	gas := (hexutil.Uint64)(systemContractReadGasLimit)
+	gas := (hexutil.Uint64)(uint64(math.MaxUint64 / 2))
 	args := ethapi.TransactionArgs{
 		From: &header.Coinbase,
 		To:   &systemcontract.TokenomicsContractAddress,
@@ -2374,7 +2374,7 @@ func (p *Parlia) getCurrentValidators(blockHash common.Hash, blockNum *big.Int, 
 	// call
 	msgData := (hexutil.Bytes)(data)
 	toAddress := common.HexToAddress(systemcontract.ValidatorContract)
-	gas := (hexutil.Uint64)(systemContractReadGasLimit)
+	gas := (hexutil.Uint64)(uint64(math.MaxUint64 / 2))
 	args := ethapi.TransactionArgs{
 		Gas:  &gas,
 		To:   &toAddress,
