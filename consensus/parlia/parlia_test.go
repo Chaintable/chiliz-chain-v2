@@ -3,6 +3,7 @@ package parlia
 import (
 	"crypto/ecdsa"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -15,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	cmath "github.com/ethereum/go-ethereum/common/math"
+	"github.com/ethereum/go-ethereum/common/systemcontract"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core"
@@ -725,6 +727,171 @@ var (
 	testKey, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
 	testAddr   = crypto.PubkeyToAddress(testKey.PublicKey)
 )
+
+type testStateWithParent struct {
+	vm.StateDB
+	parent *state.StateDB
+}
+
+func (s *testStateWithParent) ParentState() *state.StateDB {
+	return s.parent
+}
+
+func returnUint256Code(value byte) []byte {
+	code := append([]byte{0x7f}, common.LeftPadBytes([]byte{value}, 32)...)
+	return append(code, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3)
+}
+
+func returnBytesCode(output []byte) []byte {
+	size := []byte{byte(len(output) >> 8), byte(len(output))}
+	code := []byte{0x61, size[0], size[1], 0x60, 0x0e, 0x60, 0x00, 0x39, 0x61, size[0], size[1], 0x60, 0x00, 0xf3}
+	return append(code, output...)
+}
+
+func TestGetLastSupplyFromReplayParentState(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	trieDB := triedb.NewDatabase(db, nil)
+	defer trieDB.Close()
+
+	genesis := &core.Genesis{
+		Config: params.ParliaTestChainConfig,
+		Alloc: types.GenesisAlloc{
+			systemcontract.TokenomicsContractAddress: {Code: returnUint256Code(42)},
+		},
+	}
+	genesisBlock := genesis.MustCommit(db, trieDB)
+	mockEngine := &mockParlia{}
+	chain, err := core.NewBlockChain(db, genesis, mockEngine, nil)
+	if err != nil {
+		t.Fatalf("failed to create blockchain: %v", err)
+	}
+	defer chain.Stop()
+
+	stateDB, err := state.New(genesisBlock.Root(), state.NewDatabase(trieDB, nil))
+	if err != nil {
+		t.Fatalf("failed to open parent state: %v", err)
+	}
+	currentState := stateDB.Copy()
+	currentState.SetCode(systemcontract.TokenomicsContractAddress, returnUint256Code(99))
+
+	engine := New(params.ParliaTestChainConfig, db, nil, genesisBlock.Hash())
+	header := &types.Header{
+		ParentHash: genesisBlock.Hash(),
+		Number:     big.NewInt(1),
+		Coinbase:   testAddr,
+		Difficulty: big.NewInt(1),
+		GasLimit:   30_000_000,
+		Time:       genesisBlock.Time() + 1,
+	}
+	cx := chainContext{Chain: chain, parlia: engine}
+	got, err := engine.getLastSupplyFromTokenomics(&testStateWithParent{StateDB: currentState, parent: stateDB}, header, cx)
+	if err != nil {
+		t.Fatalf("failed to read total supply from replay parent state: %v", err)
+	}
+	if want := big.NewInt(42); got.Cmp(want) != 0 {
+		t.Fatalf("wrong parent total supply: have %v, want %v", got, want)
+	}
+	if nonce := stateDB.GetNonce(testAddr); nonce != 0 {
+		t.Fatalf("parent state was mutated by eth_call: nonce %d", nonce)
+	}
+}
+
+func TestReplaySystemContractReadGasLimit(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	trieDB := triedb.NewDatabase(db, nil)
+	defer trieDB.Close()
+
+	// Return GAS so the result exposes the effective execution limit.
+	gasLeftCode := []byte{0x5a, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3}
+	genesis := &core.Genesis{
+		Config: params.ParliaTestChainConfig,
+		Alloc: types.GenesisAlloc{
+			systemcontract.TokenomicsContractAddress: {Code: gasLeftCode},
+		},
+	}
+	genesisBlock := genesis.MustCommit(db, trieDB)
+	chain, err := core.NewBlockChain(db, genesis, &mockParlia{}, nil)
+	if err != nil {
+		t.Fatalf("failed to create blockchain: %v", err)
+	}
+	defer chain.Stop()
+
+	parentState, err := state.New(genesisBlock.Root(), state.NewDatabase(trieDB, nil))
+	if err != nil {
+		t.Fatalf("failed to open parent state: %v", err)
+	}
+	engine := New(params.ParliaTestChainConfig, db, nil, genesisBlock.Hash())
+	header := &types.Header{
+		ParentHash: genesisBlock.Hash(),
+		Number:     big.NewInt(1),
+		Coinbase:   testAddr,
+		Difficulty: big.NewInt(1),
+		GasLimit:   30_000_000,
+		Time:       genesisBlock.Time() + 1,
+	}
+	cx := chainContext{Chain: chain, parlia: engine}
+
+	got, err := engine.getLastSupplyFromTokenomics(&testStateWithParent{StateDB: parentState.Copy(), parent: parentState}, header, cx)
+	if err != nil {
+		t.Fatalf("failed to read gas left: %v", err)
+	}
+	if got.Sign() <= 0 || got.Uint64() > systemContractReadGasLimit {
+		t.Fatalf("system contract read exceeded gas limit: have %v, limit %d", got, systemContractReadGasLimit)
+	}
+
+	// An infinite loop must terminate deterministically with out-of-gas instead
+	// of occupying a replay worker indefinitely.
+	loopState := parentState.Copy()
+	loopState.SetCode(systemcontract.TokenomicsContractAddress, []byte{0x5b, 0x60, 0x00, 0x56})
+	_, err = engine.getLastSupplyFromTokenomics(&testStateWithParent{StateDB: loopState.Copy(), parent: loopState}, header, cx)
+	if !errors.Is(err, vm.ErrOutOfGas) {
+		t.Fatalf("infinite system contract call returned %v, want %v", err, vm.ErrOutOfGas)
+	}
+}
+
+func TestGetCurrentValidatorsFromReplayParentState(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	trieDB := triedb.NewDatabase(db, nil)
+	defer trieDB.Close()
+
+	config := *params.ParliaTestChainConfig
+	config.LubanBlock = nil
+	validator := common.HexToAddress("0x1234")
+	engine := New(&config, db, nil, common.Hash{})
+	output, err := engine.validatorSetABIBeforeLuban.Methods["getMiningValidators"].Outputs.Pack([]common.Address{validator})
+	if err != nil {
+		t.Fatalf("failed to encode validator result: %v", err)
+	}
+	genesis := &core.Genesis{
+		Config: &config,
+		Alloc: types.GenesisAlloc{
+			common.HexToAddress(systemcontract.ValidatorContract): {Code: returnBytesCode(output)},
+		},
+	}
+	genesisBlock := genesis.MustCommit(db, trieDB)
+	mockEngine := &mockParlia{}
+	chain, err := core.NewBlockChain(db, genesis, mockEngine, nil)
+	if err != nil {
+		t.Fatalf("failed to create blockchain: %v", err)
+	}
+	defer chain.Stop()
+
+	parentState, err := state.New(genesisBlock.Root(), state.NewDatabase(trieDB, nil))
+	if err != nil {
+		t.Fatalf("failed to open parent state: %v", err)
+	}
+	currentState := parentState.Copy()
+	currentState.SetCode(common.HexToAddress(systemcontract.ValidatorContract), nil)
+	engine.genesisHash = genesisBlock.Hash()
+	cx := chainContext{Chain: chain, parlia: engine}
+	got, _, err := engine.getCurrentValidators(genesisBlock.Hash(), big.NewInt(0), &testStateWithParent{StateDB: currentState, parent: parentState}, cx)
+	if err != nil {
+		t.Fatalf("failed to read validators from replay parent state: %v", err)
+	}
+	if len(got) != 1 || got[0] != validator {
+		t.Fatalf("wrong validators: have %v, want [%v]", got, validator)
+	}
+}
 
 func TestParlia_applyTransactionTracing(t *testing.T) {
 	frdir := t.TempDir()

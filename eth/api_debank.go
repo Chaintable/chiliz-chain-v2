@@ -82,7 +82,7 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	if parent == nil {
 		return nil, fmt.Errorf("parent block %s not found", block.ParentHash().Hex())
 	}
-	statedb, release, err := api.eth.APIBackend.StateAtBlock(ctx, parent, 128, nil, true, false)
+	statedb, release, err := api.eth.APIBackend.StateAtBlock(ctx, parent, api.eth.BlockChain().TriesInMemory(), nil, true, false)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +110,7 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	// system-tx tracing — so the replayed state root always matches consensus and every
 	// current/future hardfork system call is handled automatically, with no hand-rolled tx
 	// loop to keep in sync with upstream.
-	if _, err = api.eth.BlockChain().Processor().Process(block, statedb, vm.Config{Tracer: hooks}); err != nil {
+	if _, err = api.eth.BlockChain().Processor().Process(block, statedb, vm.Config{Tracer: hooks, HistoricalStateReplay: true}); err != nil {
 		return nil, fmt.Errorf("could not process block: %w", err)
 	}
 

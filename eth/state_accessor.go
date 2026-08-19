@@ -155,7 +155,8 @@ func (eth *Ethereum) hashState(ctx context.Context, block *types.Block, reexec u
 		if current = eth.blockchain.GetBlockByNumber(next); current == nil {
 			return nil, nil, fmt.Errorf("block #%d not found", next)
 		}
-		_, err := eth.blockchain.Processor().Process(current, statedb, vm.Config{})
+		statedb.SetExpectedStateRoot(current.Root())
+		_, err := eth.blockchain.Processor().Process(current, statedb, vm.Config{HistoricalStateReplay: true})
 		if err != nil {
 			return nil, nil, fmt.Errorf("processing block %d failed: %v", current.NumberU64(), err)
 		}
@@ -164,6 +165,10 @@ func (eth *Ethereum) hashState(ctx context.Context, block *types.Block, reexec u
 		if err != nil {
 			return nil, nil, fmt.Errorf("stateAtBlock commit failed, number %d root %v: %w",
 				current.NumberU64(), current.Root().Hex(), err)
+		}
+		if root != current.Root() {
+			return nil, nil, fmt.Errorf("state root mismatch after replaying block %d: have %v, want %v",
+				current.NumberU64(), root.Hex(), current.Root().Hex())
 		}
 		statedb, err = state.New(root, database)
 		if err != nil {

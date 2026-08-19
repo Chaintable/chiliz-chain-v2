@@ -30,7 +30,10 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie"
@@ -39,6 +42,91 @@ import (
 )
 
 func u64(val uint64) *uint64 { return &val }
+
+type parentStateCheckingEngine struct {
+	consensus.Engine
+	account      common.Address
+	expectParent bool
+	checked      bool
+}
+
+func (e *parentStateCheckingEngine) Finalize(chain consensus.ChainHeaderReader, header *types.Header, stateDB vm.StateDB, txs *[]*types.Transaction,
+	uncles []*types.Header, withdrawals []*types.Withdrawal, receipts *[]*types.Receipt, systemTxs *[]*types.Transaction, usedGas *uint64, tracer *tracing.Hooks) error {
+	provider, ok := stateDB.(interface{ ParentState() *state.StateDB })
+	if e.expectParent && !ok {
+		return errors.New("finalize state does not carry parent state")
+	}
+	if !e.expectParent && ok {
+		return errors.New("normal block processing unexpectedly carries parent state")
+	}
+	if e.expectParent {
+		if nonce := provider.ParentState().GetNonce(e.account); nonce != 0 {
+			return errors.New("parent state includes current block transaction")
+		}
+	}
+	if nonce := stateDB.GetNonce(e.account); nonce != 1 {
+		return errors.New("current state does not include current block transaction")
+	}
+	e.checked = true
+	return e.Engine.Finalize(chain, header, stateDB, txs, uncles, withdrawals, receipts, systemTxs, usedGas, tracer)
+}
+
+func testStateProcessorParentState(t *testing.T, historicalReplay bool) {
+	t.Helper()
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := crypto.PubkeyToAddress(key.PublicKey)
+	dragon8Time := uint64(0)
+	config := *params.TestChainConfig
+	config.Dragon8Time = &dragon8Time
+	genesis := &Genesis{
+		Config:  &config,
+		BaseFee: big.NewInt(params.InitialBaseFee),
+		Alloc: types.GenesisAlloc{
+			account: {Balance: new(big.Int).Mul(big.NewInt(10), big.NewInt(params.Ether))},
+		},
+	}
+	generateEngine := ethash.NewFaker()
+	signer := types.LatestSigner(&config)
+	_, blocks, _ := GenerateChainWithGenesis(genesis, generateEngine, 1, func(_ int, block *BlockGen) {
+		tx, err := types.SignTx(types.NewTransaction(block.TxNonce(account), common.Address{1}, big.NewInt(1), params.TxGas, block.BaseFee(), nil), signer, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		block.AddTx(tx)
+	})
+
+	engine := &parentStateCheckingEngine{Engine: ethash.NewFaker(), account: account, expectParent: historicalReplay}
+	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), genesis, engine, nil)
+	if err != nil {
+		t.Fatalf("failed to create blockchain: %v", err)
+	}
+	defer chain.Stop()
+	if historicalReplay {
+		statedb, err := chain.StateAt(chain.GetBlockByNumber(0).Root())
+		if err != nil {
+			t.Fatalf("failed to open genesis state: %v", err)
+		}
+		if _, err := chain.Processor().Process(blocks[0], statedb, vm.Config{HistoricalStateReplay: true}); err != nil {
+			t.Fatalf("failed to replay block: %v", err)
+		}
+	} else if _, err := chain.InsertChain(blocks); err != nil {
+		t.Fatalf("failed to import block: %v", err)
+	}
+	if !engine.checked {
+		t.Fatal("consensus finalization did not inspect parent state")
+	}
+}
+
+func TestStateProcessorCarriesDragon8ParentStateDuringHistoricalReplay(t *testing.T) {
+	testStateProcessorParentState(t, true)
+}
+
+func TestStateProcessorKeepsNormalDragon8ConsensusPath(t *testing.T) {
+	testStateProcessorParentState(t, false)
+}
 
 // TestStateProcessorErrors tests the output from the 'core' errors
 // as defined in core/error.go. These errors are generated when the

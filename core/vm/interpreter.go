@@ -34,6 +34,7 @@ type Config struct {
 	EnablePreimageRecording   bool  // Enables recording of SHA3/keccak preimages
 	ExtraEips                 []int // Additional EIPS that are to be enabled
 	EnableOpcodeOptimizations bool  // Enable opcode optimization
+	HistoricalStateReplay     bool  // State was regenerated outside the canonical chain backend
 
 	StatelessSelfValidation bool // Generate execution witnesses and self-check against them (testing purpose)
 }

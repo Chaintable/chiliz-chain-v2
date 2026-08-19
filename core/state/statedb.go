@@ -47,7 +47,7 @@ import (
 
 const defaultNumOfSlots = 100
 
-// TriesInMemory represents the number of layers that are kept in RAM.
+// TriesInMemory is the default number of trie layers kept in memory.
 const TriesInMemory = 128
 
 type mutationType int
@@ -1533,12 +1533,12 @@ func (s *StateDB) commitAndFlush(block uint64, deleteEmptyObjects bool, noStorag
 			if err := snap.Update(ret.root, ret.originRoot, ret.accounts, ret.storages); err != nil {
 				log.Warn("Failed to update snapshot tree", "from", ret.originRoot, "to", ret.root, "err", err)
 			}
-			// Keep 128 diff layers in the memory, persistent layer is 129th.
+			// Keep the configured number of diff layers in memory, followed by the
+			// persistent layer.
 			// - head layer is paired with HEAD state
 			// - head-1 layer is paired with HEAD-1 state
-			// - head-127 layer(bottom-most diff layer) is paired with HEAD-127 state
 			if err := snap.Cap(ret.root, snap.CapLimit()); err != nil {
-				log.Warn("Failed to cap snapshot tree", "root", ret.root, "layers", TriesInMemory, "err", err)
+				log.Warn("Failed to cap snapshot tree", "root", ret.root, "layers", snap.CapLimit(), "err", err)
 			}
 			if metrics.EnabledExpensive() {
 				s.SnapshotCommits += time.Since(start)
