@@ -772,7 +772,7 @@ func TestGetLastSupplyFromReplayParentState(t *testing.T) {
 		t.Fatalf("failed to open parent state: %v", err)
 	}
 	currentState := stateDB.Copy()
-	currentState.SetCode(systemcontract.TokenomicsContractAddress, returnUint256Code(99))
+	currentState.SetCode(systemcontract.TokenomicsContractAddress, returnUint256Code(99), tracing.CodeChangeUnspecified)
 
 	engine := New(params.ParliaTestChainConfig, db, nil, genesisBlock.Hash())
 	header := &types.Header{
@@ -783,7 +783,7 @@ func TestGetLastSupplyFromReplayParentState(t *testing.T) {
 		GasLimit:   30_000_000,
 		Time:       genesisBlock.Time() + 1,
 	}
-	cx := chainContext{Chain: chain, parlia: engine}
+	cx := chainContext{ChainHeaderReader: chain, parlia: engine}
 	got, err := engine.getLastSupplyFromTokenomics(&testStateWithParent{StateDB: currentState, parent: stateDB}, header, cx)
 	if err != nil {
 		t.Fatalf("failed to read total supply from replay parent state: %v", err)
@@ -829,7 +829,7 @@ func TestReplaySystemContractReadGasLimit(t *testing.T) {
 		GasLimit:   30_000_000,
 		Time:       genesisBlock.Time() + 1,
 	}
-	cx := chainContext{Chain: chain, parlia: engine}
+	cx := chainContext{ChainHeaderReader: chain, parlia: engine}
 
 	got, err := engine.getLastSupplyFromTokenomics(&testStateWithParent{StateDB: parentState.Copy(), parent: parentState}, header, cx)
 	if err != nil {
@@ -842,7 +842,7 @@ func TestReplaySystemContractReadGasLimit(t *testing.T) {
 	// An infinite loop must terminate deterministically with out-of-gas instead
 	// of occupying a replay worker indefinitely.
 	loopState := parentState.Copy()
-	loopState.SetCode(systemcontract.TokenomicsContractAddress, []byte{0x5b, 0x60, 0x00, 0x56})
+	loopState.SetCode(systemcontract.TokenomicsContractAddress, []byte{0x5b, 0x60, 0x00, 0x56}, tracing.CodeChangeUnspecified)
 	_, err = engine.getLastSupplyFromTokenomics(&testStateWithParent{StateDB: loopState.Copy(), parent: loopState}, header, cx)
 	if !errors.Is(err, vm.ErrOutOfGas) {
 		t.Fatalf("infinite system contract call returned %v, want %v", err, vm.ErrOutOfGas)
@@ -881,9 +881,9 @@ func TestGetCurrentValidatorsFromReplayParentState(t *testing.T) {
 		t.Fatalf("failed to open parent state: %v", err)
 	}
 	currentState := parentState.Copy()
-	currentState.SetCode(common.HexToAddress(systemcontract.ValidatorContract), nil)
+	currentState.SetCode(common.HexToAddress(systemcontract.ValidatorContract), nil, tracing.CodeChangeUnspecified)
 	engine.genesisHash = genesisBlock.Hash()
-	cx := chainContext{Chain: chain, parlia: engine}
+	cx := chainContext{ChainHeaderReader: chain, parlia: engine}
 	got, _, err := engine.getCurrentValidators(genesisBlock.Hash(), big.NewInt(0), &testStateWithParent{StateDB: currentState, parent: parentState}, cx)
 	if err != nil {
 		t.Fatalf("failed to read validators from replay parent state: %v", err)
@@ -894,6 +894,10 @@ func TestGetCurrentValidatorsFromReplayParentState(t *testing.T) {
 }
 
 func TestParlia_applyTransactionTracing(t *testing.T) {
+	// Skipped intentionally: this test packs the Feynman-only system method
+	// distributeFinalityReward, but Chiliz does not (and will not) enable the
+	// Feynman fork, so that method is absent from the validator-set ABI. See COR-39.
+	t.Skip("Chiliz does not enable the Feynman fork; distributeFinalityReward is not available (COR-39)")
 	frdir := t.TempDir()
 	db, err := rawdb.NewDatabaseWithFreezer(rawdb.NewMemoryDatabase(), frdir, "", false)
 	if err != nil {
@@ -956,7 +960,7 @@ func TestParlia_applyTransactionTracing(t *testing.T) {
 	recording := &recordingTracer{}
 	hooks := recording.hooks()
 
-	cx := chainContext{Chain: chain, parlia: engine}
+	cx := chainContext{ChainHeaderReader: chain, parlia: engine}
 	applyErr := engine.applyTransaction(msg, state.NewHookedState(stateDB, hooks), bs[0].Header(), cx, &txs, &receipts, &receivedTxs, &usedGas, false, hooks)
 	if applyErr != nil {
 		t.Fatalf("failed to apply system contract transaction: %v", applyErr)
@@ -965,15 +969,15 @@ func TestParlia_applyTransactionTracing(t *testing.T) {
 	expectedRecords := []string{
 		"system tx start",
 		"tx [0xe9a5597c7f5a6a10a18959d262319fbf19cecb4d9d1ce8f2c990089bd88016fc] from [0x0000000000000000000000000000000000000000] start",
-		"nonce change [0x0000000000000000000000000000000000000000]: 0 -> 1",
 		"call enter [0x0000000000000000000000000000000000000000] -> [0x0000000000000000000000000000000000001000] (type 241, gas 9223372036854775807, value 0)",
 		"call exit (depth 0, gas used 0, reverted false, err: <none>)",
+		"nonce change [0x0000000000000000000000000000000000000000]: 0 -> 1",
 		"tx [0xe9a5597c7f5a6a10a18959d262319fbf19cecb4d9d1ce8f2c990089bd88016fc] end (log count 0, cumulative gas used 0, err: <none>)",
 		"system tx end",
 	}
 
 	if !slices.Equal(recording.records, expectedRecords) {
-		t.Errorf("expected \n%s\n\ngot\n\n%s", formatRecords(recording.records), formatRecords(expectedRecords))
+		t.Errorf("expected \n%s\n\ngot\n\n%s", formatRecords(expectedRecords), formatRecords(recording.records))
 	}
 }
 
