@@ -116,12 +116,12 @@ networks:
 | 检查 | 结果 |
 |---|---|
 | 区块 hash（与官方 RPC） | 追块段起点 38,192,118–137、中段 38,206,215–234、重启后 38,226,000–019，共 60 块全部一致 |
-| `trace_debankBlock`（与生产 writer 同块） | 11 块全部一致：5 个合约调用块（58–80 条 trace、11–17 条 event）、5 个多交易块（6–12 笔）、1 个仅系统交易块，范围 38,220,335–38,224,743 |
+| `trace_debankBlock`（与生产 writer 同块） | 111 块全部一致。第一批 11 块（38,220,335–38,224,743）：5 个合约调用块、5 个多交易块、1 个仅系统交易块。第二批 100 块（38,226,000–38,247,070）：49 个活动最多的块（每块 12–105 条非系统合约日志）、epoch 块 38,246,400、50 个等距抽样块；合计 293 笔交易、6,454 条 trace、1,490 条 event、8 条 error trace、2,468 个 storage slot、1,330 个账户、3 个新 code |
 | `trace_debankBlock` 自检 | 追块段 7 块成功返回并通过节点内 state root 校验，含 epoch 块 38,217,600（其 stateRoot 与官方一致，覆盖 epoch 块 validator 校验读 parent state 的路径） |
 | 优雅重启 | `docker compose stop` 20.3 s 退出（exit 0），按预期写入 HEAD、HEAD-1、HEAD-29999 状态；重启后从 38,225,981 继续，固定块 38,225,856 的 hash/stateRoot 不变，继续导块，0 次自动重启、0 OOM |
 | 资源 | 追块期间内存约 9.9 GiB / 16 GiB；数据盘剩余 148 GiB（82% 已用） |
 
-trace 对比口径：只忽略节点本地处理时间 `process_start_timestamp`；`storage_contracts` 按集合比较；`state_diff` 解码为 RLP 六字段（Hash、ParentHash、NewAccounts、DeletedAccounts、StorageDiff、NewCodes）后按集合比较（Go map 遍历顺序不确定，两版本都如此）；其余字段（含 validation_hash）逐字节一致。生产 writer 只在内存中保留最近 30000 块状态，trace 对比样本只取该窗口内的块，避免让生产节点重建历史状态。
+trace 对比口径：只忽略节点本地处理时间 `process_start_timestamp`；`storage_contracts` 按集合比较；`state_diff` 解码为 RLP 六字段（Hash、ParentHash、NewAccounts、DeletedAccounts、StorageDiff、NewCodes）后按集合比较（Go map 遍历顺序不确定，两版本都如此）；其余字段（含 validation_hash）逐字节一致。两侧 `state_diff` 原始字节在 111 块中均不同（列表顺序），解码后全部一致。生产 writer 只在内存中保留最近 30000 块状态，trace 对比样本只取该窗口内的块，避免让生产节点重建历史状态。
 
 启动日志中的 `Unavailable modules in HTTP API list [personal debank]` 和 metrics 与 pprof 争用 6060 端口来自生产启动参数，v2.9.5 已记录，与本次合并无关。
 
